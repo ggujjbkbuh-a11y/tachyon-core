@@ -15,6 +15,8 @@
 //! stay chunked HTTP streams. `external_ui` is mounted under `/ui/` and,
 //! when the directory is empty, filled once from `external_ui_download_url`
 //! (Yacd-meta by default), the way `checkAndDownloadExternalUI` does it.
+//! `POST /parse` converts a NaiveProxy `naive+https://` share link into an
+//! outbound configuration object for LuCI integrations.
 //!
 //! Known gaps (roadmap): proxy/rule providers (404 — no provider runtime),
 //! and cache.db persistence (the delay history is in-memory only).
@@ -44,6 +46,7 @@ const DEPRECATED_MSG: &str = "create clash-server: cache_file and related fields
      is deprecated in sing-box 1.8.0, use experimental.cache_file instead.";
 
 const GET_ONLY: &[&str] = &["GET"];
+const POST_ONLY: &[&str] = &["POST"];
 const GET_PUT: &[&str] = &["GET", "PUT"];
 const GET_DELETE: &[&str] = &["GET", "DELETE"];
 const GET_PUT_PATCH: &[&str] = &["GET", "PUT", "PATCH"];
@@ -377,11 +380,12 @@ async fn handle_request(
     }
 
     // Direct routes (`/`, `/version`): method mismatch never reaches the
-    // group middleware, so 405 comes before auth. Mounted `/proxies`
-    // authenticates first (probed against the reference).
+    // group middleware, so 405 comes before auth. Mounted controller routes
+    // authenticate first (probed against the reference).
     let mounted = matches!(
         route,
-        Route::Proxies
+        Route::Parse
+            | Route::Proxies
             | Route::Proxy(_)
             | Route::Delay(_)
             | Route::Logs
@@ -465,6 +469,9 @@ async fn handle_request(
             )
             .await?;
         }
+        Route::Parse => {
+            return handle_parse_route(stream, &headers, &cors).await;
+        }
         Route::Proxy(name) => {
             return handle_proxy_route(
                 stream, router, method, &name, false, &headers, &query, &cors,
@@ -516,6 +523,7 @@ async fn handle_request(
 enum Route {
     Root,
     Version,
+    Parse,
     Proxies,
     Proxy(String),
     Delay(String),
@@ -539,6 +547,7 @@ fn classify_with_ui(path: &str, external_ui: bool) -> (Route, &'static [&'static
     match path {
         "/" => (Route::Root, GET_ONLY),
         "/version" => (Route::Version, GET_ONLY),
+        "/parse" => (Route::Parse, POST_ONLY),
         "/proxies" | "/proxies/" => (Route::Proxies, GET_ONLY),
         "/logs" => (Route::Logs, GET_ONLY),
         "/traffic" => (Route::Traffic, GET_ONLY),
@@ -563,6 +572,160 @@ fn classify_with_ui(path: &str, external_ui: bool) -> (Route, &'static [&'static
             },
         },
     }
+}
+
+/// `POST /parse`: turn a NaiveProxy share URL into one outbound config object.
+async fn handle_parse_route(
+    stream: &mut TcpStream,
+    headers: &[(String, String)],
+    cors: &[String],
+) -> std::io::Result<bool> {
+    let len: usize = header_get(headers, "content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if len > MAX_BODY {
+        respond_json(stream, 400, "Bad Request", &bad_request(), cors).await?;
+        return Ok(false);
+    }
+    let mut body = vec![0u8; len];
+    if len > 0 && stream.read_exact(&mut body).await.is_err() {
+        return Ok(false);
+    }
+    let parsed = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("url").and_then(Value::as_str).map(str::to_string))
+        .ok_or_else(|| "Body must be a JSON object with a string url field".to_string())
+        .and_then(|url| parse_naive_share_link(&url));
+    match parsed {
+        Ok(outbound) => respond_json(stream, 200, "OK", &outbound, cors).await?,
+        Err(message) => {
+            respond_json(stream, 400, "Bad Request", &json!({"message": message}), cors).await?
+        }
+    }
+    Ok(true)
+}
+
+fn parse_naive_share_link(link: &str) -> Result<Value, String> {
+    const SCHEME: &str = "naive+https://";
+    let link = link.trim();
+    let rest = link
+        .get(..SCHEME.len())
+        .filter(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+        .and_then(|_| link.get(SCHEME.len()..))
+        .ok_or_else(|| "Expected a naive+https:// share URL".to_string())?;
+    let (before_fragment, fragment) = match rest.split_once('#') {
+        Some((url, name)) => (url, Some(name)),
+        None => (rest, None),
+    };
+    let (before_query, query) = match before_fragment.split_once('?') {
+        Some((url, query)) => (url, Some(query)),
+        None => (before_fragment, None),
+    };
+    let (authority, path) = match before_query.split_once('/') {
+        Some((authority, path)) => (authority, Some(path)),
+        None => (before_query, None),
+    };
+    if path.is_some_and(|path| !path.is_empty()) {
+        return Err("NaiveProxy share URL must not contain a path".to_string());
+    }
+
+    let (userinfo, address) = authority
+        .rsplit_once('@')
+        .ok_or_else(|| "NaiveProxy share URL must include username and password".to_string())?;
+    if userinfo.contains('@') {
+        return Err("Invalid NaiveProxy share URL credentials".to_string());
+    }
+    let (username, password) = userinfo
+        .split_once(':')
+        .ok_or_else(|| "NaiveProxy share URL must include username and password".to_string())?;
+    let username = decode_uri_component(username)?;
+    let password = decode_uri_component(password)?;
+    if username.is_empty() || password.is_empty() {
+        return Err("NaiveProxy username and password must not be empty".to_string());
+    }
+
+    let (server, port) = parse_naive_address(address)?;
+    if let Some(query) = query
+        && query != "padding=true"
+    {
+        return Err("Only the padding=true NaiveProxy URL parameter is supported".to_string());
+    }
+    let tag = match fragment {
+        Some(name) if !name.is_empty() => decode_uri_component(name)?,
+        _ => server.clone(),
+    };
+    if tag.is_empty() {
+        return Err("NaiveProxy tag must not be empty".to_string());
+    }
+
+    Ok(json!({
+        "type": "naive",
+        "tag": tag,
+        "server": server,
+        "server_port": port,
+        "username": username,
+        "password": password,
+        "tls": {"enabled": true}
+    }))
+}
+
+fn parse_naive_address(address: &str) -> Result<(String, u16), String> {
+    let invalid = || "Invalid NaiveProxy server address".to_string();
+    let (host, port) = if let Some(rest) = address.strip_prefix('[') {
+        let (host, suffix) = rest.split_once(']').ok_or_else(invalid)?;
+        host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
+        let port = match suffix {
+            "" => 443,
+            suffix => suffix
+                .strip_prefix(':')
+                .ok_or_else(invalid)?
+                .parse::<u16>()
+                .map_err(|_| invalid())?,
+        };
+        (host.to_string(), port)
+    } else {
+        match address.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') => (
+                host.to_string(),
+                port.parse::<u16>().map_err(|_| invalid())?,
+            ),
+            Some(_) => return Err(invalid()),
+            None => (address.to_string(), 443),
+        }
+    };
+    if host.is_empty()
+        || port == 0
+        || host.chars().any(|c| {
+            c.is_ascii_whitespace() || c.is_control() || matches!(c, '/' | '?' | '#' | '@')
+        })
+    {
+        return Err(invalid());
+    }
+    Ok((host, port))
+}
+
+fn decode_uri_component(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err("Invalid percent-encoding in NaiveProxy share URL".to_string());
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .map_err(|_| "Invalid percent-encoding in NaiveProxy share URL".to_string())?;
+            let byte = u8::from_str_radix(hex, 16)
+                .map_err(|_| "Invalid percent-encoding in NaiveProxy share URL".to_string())?;
+            decoded.push(byte);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| "NaiveProxy share URL contains invalid UTF-8".to_string())
 }
 
 fn classify_proxies(path: &str, external_ui: bool) -> (Route, &'static [&'static str]) {
@@ -1879,6 +2042,8 @@ mod tests {
             classify_with_ui("/version", false).0,
             Route::Version
         ));
+        assert!(matches!(classify_with_ui("/parse", false).0, Route::Parse));
+        assert_eq!(classify_with_ui("/parse", false).1, POST_ONLY);
         assert!(matches!(
             classify_with_ui("/proxies", false).0,
             Route::Proxies
@@ -1935,6 +2100,50 @@ mod tests {
         ));
         assert_eq!(classify_with_ui("/proxies/sel", false).1, GET_PUT);
         assert_eq!(classify_with_ui("/version", false).1, GET_ONLY);
+    }
+
+    #[test]
+    fn parses_naive_share_links() {
+        let outbound = parse_naive_share_link(
+            "naive+https://alice:p%40ss@example.com:8443?padding=true#My%20proxy",
+        )
+        .expect("NaiveProxy link");
+        assert_eq!(
+            outbound,
+            json!({
+                "type": "naive",
+                "tag": "My proxy",
+                "server": "example.com",
+                "server_port": 8443,
+                "username": "alice",
+                "password": "p@ss",
+                "tls": {"enabled": true}
+            })
+        );
+
+        let default_port = parse_naive_share_link("naive+https://u:p@example.com")
+            .expect("default NaiveProxy port");
+        assert_eq!(default_port["server_port"], 443);
+        assert_eq!(default_port["tag"], "example.com");
+
+        let ipv6 =
+            parse_naive_share_link("naive+https://u:p@[2001:db8::1]:9443#v6").expect("IPv6 link");
+        assert_eq!(ipv6["server"], "2001:db8::1");
+        assert_eq!(ipv6["server_port"], 9443);
+    }
+
+    #[test]
+    fn rejects_invalid_naive_share_links() {
+        for link in [
+            "https://u:p@example.com",
+            "naive+https://example.com",
+            "naive+https://u:p@example.com:0",
+            "naive+https://u:p@example.com?padding=false",
+            "naive+https://u:p@example.com/path",
+            "naive+https://u:p%ZZ@example.com",
+        ] {
+            assert!(parse_naive_share_link(link).is_err(), "{link}");
+        }
     }
 
     #[test]

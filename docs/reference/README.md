@@ -15,7 +15,7 @@
 | `outbounds` | Точки выхода — [outbounds/](outbounds/). |
 | `endpoints` | Туннели WireGuard, AmneziaWG, OpenVPN — [endpoints](endpoints.md). |
 | `route` | Правила маршрутизации, rule-set — [routing](common/routing.md). |
-| `experimental` | Clash API, файл кэша. |
+| `experimental` | Clash API, файл кэша — [Clash API](clash-api.md). |
 | `ntp` | Клиент синхронизации времени. |
 | `http_clients` | Реестр HTTP-клиентов для загрузки списков. |
 

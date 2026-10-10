@@ -107,6 +107,15 @@ async fn clash_api_rest_surface() {
         "outbounds": [
             {"type": "direct", "tag": "direct-out"},
             {"type": "direct", "tag": "backup"},
+            {
+                "type": "naive",
+                "tag": "naive-out",
+                "server": "proxy.example",
+                "server_port": 443,
+                "username": "user",
+                "password": "pass",
+                "tls": {"enabled": true}
+            },
             {"type": "selector", "tag": "sel", "outbounds": ["direct-out", "backup"]}
         ],
         "route": {"final": "direct-out"}
@@ -266,15 +275,64 @@ async fn clash_api_rest_surface() {
     assert_eq!(proxies["GLOBAL"]["type"], "Fallback");
     assert_eq!(proxies["GLOBAL"]["udp"], true);
     assert_eq!(proxies["GLOBAL"]["now"], "direct-out");
-    assert_eq!(proxies["GLOBAL"]["all"], serde_json::json!(["sel"]));
+    assert_eq!(
+        proxies["GLOBAL"]["all"],
+        serde_json::json!(["naive-out", "sel"])
+    );
     assert_eq!(proxies["direct-out"]["type"], "Direct");
     assert_eq!(proxies["backup"]["type"], "Direct");
+    assert_eq!(proxies["naive-out"]["type"], "NaiveProxy");
     assert_eq!(proxies["sel"]["type"], "Selector");
     assert_eq!(proxies["sel"]["now"], "direct-out");
     assert_eq!(
         proxies["sel"]["all"],
         serde_json::json!(["direct-out", "backup"])
     );
+
+    // --- NaiveProxy share-link import ----------------------------------
+    let res = request(addr, "POST /parse HTTP/1.1\r\nHost: x\r\n\r\n").await;
+    assert_eq!(res.status, 401);
+    assert_eq!(res.json()["message"], "Unauthorized");
+
+    let url = "naive+https://alice:p%40ss@example.com:8443?padding=true#My%20proxy";
+    let body = serde_json::json!({"url": url}).to_string();
+    let res = request(
+        addr,
+        &format!(
+            "POST /parse HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {SECRET}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await;
+    assert_eq!(res.status, 200);
+    assert_eq!(
+        res.json(),
+        serde_json::json!({
+            "type": "naive",
+            "tag": "My proxy",
+            "server": "example.com",
+            "server_port": 8443,
+            "username": "alice",
+            "password": "p@ss",
+            "tls": {"enabled": true}
+        })
+    );
+
+    let res = request(addr, &authed("/parse")).await;
+    assert_eq!(res.status, 405);
+    assert_eq!(res.header("allow"), Some("POST"));
+
+    let invalid = serde_json::json!({"url": "ss://invalid"});
+    let res = request(
+        addr,
+        &format!(
+            "POST /parse HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {SECRET}\r\nContent-Length: {}\r\n\r\n{invalid}",
+            invalid.to_string().len()
+        ),
+    )
+    .await;
+    assert_eq!(res.status, 400);
+    assert!(res.json()["message"].as_str().unwrap().contains("naive+https"));
 
     let res = request(addr, &authed("/proxies/sel")).await;
     assert_eq!(res.status, 200);

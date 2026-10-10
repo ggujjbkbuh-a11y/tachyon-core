@@ -176,6 +176,9 @@ tachyon-core rule-set compile rules.json -o rules.srs            # SRS v5, об�
 
 Требуется Rust 1.89+ (редакция 2024).
 
+Для установки Tachyon вместе с LuCI и управляемым `tachyon-core` на OpenWrt
+см. [инструкцию по установке аддона](openwrt/addon/README.md).
+
 ```bash
 # Сборка релизного бинарника (все протоколы, Clash API, DNS-группы, Tailscale, mmap, ~11 MiB)
 cargo build --workspace --release
