@@ -33,7 +33,7 @@ available under **Services → Tachyon** after installation.
 
 Packages and their checksums are in `packages/aarch64_cortex-a53/`:
 
-- `tachyon-core_0.0.4-1_aarch64_cortex-a53.ipk`
+- `tachyon-core_0.0.6-1_aarch64_cortex-a53.ipk`
 - `tachyon_1.5.5.ipk`
 - `luci-app-tachyon_1.5.5.ipk`
 - `luci-i18n-tachyon-ru_1.5.5.ipk`

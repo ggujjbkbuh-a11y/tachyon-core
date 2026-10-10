@@ -83,7 +83,7 @@ done
 
 echo "Installing Tachyon Core, Tachyon, and LuCI for $ARCH..."
 opkg install --force-reinstall \
-	"$PACKAGE_DIR/tachyon-core_0.0.4-1_aarch64_cortex-a53.ipk" \
+	"$PACKAGE_DIR/tachyon-core_0.0.6-1_aarch64_cortex-a53.ipk" \
 	"$PACKAGE_DIR/tachyon_1.5.5.ipk" \
 	"$PACKAGE_DIR/luci-app-tachyon_1.5.5.ipk" \
 	"$PACKAGE_DIR/luci-i18n-tachyon-ru_1.5.5.ipk" ||

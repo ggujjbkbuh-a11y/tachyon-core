@@ -6,7 +6,7 @@ on:
       version:
         description: Add-on version label
         required: true
-        default: "1.5.5"
+        default: "1.5.6"
 
 permissions:
   contents: write
