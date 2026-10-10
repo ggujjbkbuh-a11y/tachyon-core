@@ -2,9 +2,12 @@
 
 ![Tachyon Core Banner](assets/readme/hero.svg)
 
+[![OpenWrt Add-on](https://img.shields.io/badge/OpenWrt-ready_add--on-10B981?style=for-the-badge&logo=openwrt)](openwrt/addon/README.md)
+[![NaiveProxy](https://img.shields.io/badge/NaiveProxy-naive%2Bhttps-6366F1?style=for-the-badge)](openwrt/addon/README.md)
+[![Addon Releases](https://img.shields.io/github/v/release/ggujjbkbuh-a11y/tachyon-core?filter=tachyon-addon-*)](https://github.com/ggujjbkbuh-a11y/tachyon-core/releases)
 [![Stars](https://img.shields.io/github/stars/Dushnilin/tachyon-core?style=for-the-badge&color=00F0FF)](https://github.com/Dushnilin/tachyon-core/stargazers)
-[![Rust](https://img.shields.io/badge/Rust-1.89+_(2024)-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Binary Size](https://img.shields.io/badge/Binary-10.0_--_12.8_MiB-38BDF8?style=for-the-badge&logo=target)](https://github.com/Dushnilin/tachyon-core/releases/tag/v0.0.1)
+[![Rust](https://img.shields.io/badge/Engine-Rust-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Binary Size](https://img.shields.io/badge/Core-10.0_--_12.8_MiB-38BDF8?style=for-the-badge&logo=target)](BENCHMARK.md)
 [![RAM RSS](https://img.shields.io/badge/RAM_RSS-4.2_MiB_idle-10B981?style=for-the-badge&logo=speedtest)](https://github.com/Dushnilin/tachyon-core)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-36%2F39_Wins-10B981?style=for-the-badge&logo=speedtest)](BENCHMARK.md)
 [![Interactive Report](https://img.shields.io/badge/Dashboard-HTML_Report-6366F1?style=for-the-badge&logo=html5&logoColor=white)](BENCHMARK.html)
@@ -19,7 +22,30 @@
   <img src="assets/readme/divider_stream.svg" width="100%" alt="divider" />
 </p>
 
-## ⚡ Overview
+## 🚀 Install the OpenWrt add-on
+
+Tachyon is a ready-to-install OpenWrt add-on: **LuCI + management service +
+tachyon-core**, including `naive+https://` NaiveProxy links. The installer
+preserves `/etc/config/tachyon`, verifies package SHA-256 checksums, and configures
+Core as Tachyon's managed engine. The checked-in package set currently targets
+`aarch64_cortex-a53`.
+
+Run over SSH as `root`:
+
+```sh
+wget -O /tmp/tachyon-addon-install.sh \
+  https://raw.githubusercontent.com/ggujjbkbuh-a11y/tachyon-core/main/openwrt/addon/install.sh
+sh /tmp/tachyon-addon-install.sh
+```
+
+Then open **LuCI → Services → Tachyon**. If `https-dns-proxy` is installed, the
+installer removes that conflicting package while preserving its UCI settings.
+See the [add-on guide](openwrt/addon/README.md) for package details and checksums.
+
+> Packages are checked in under [`openwrt/addon/packages/aarch64_cortex-a53/`](openwrt/addon/packages/aarch64_cortex-a53/).
+> Packages can also be attached to GitHub Releases; publish them manually from Actions → **OpenWrt add-on release**.
+
+## ⚡ About the tachyon-core engine
 
 **tachyon-core** is a proxy core for routers and embedded systems, written from scratch in pure **Rust**. It takes the **same JSON config** and the **same CLI** as sing-box, but without the Go runtime: the same `/etc/sing-box/config.json`, the same `check -c` / `version` / `run`, and the same binary, which reports a compatible version string when installed under the name `sing-box`.
 

@@ -1,0 +1,36 @@
+name: OpenWrt add-on release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Add-on version label
+        required: true
+        default: "1.5.5"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish OpenWrt packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify package checksums
+        working-directory: openwrt/addon/packages/aarch64_cortex-a53
+        run: sha256sum -c SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tachyon-addon-v${{ inputs.version }}
+          name: Tachyon OpenWrt Add-on v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            openwrt/addon/packages/aarch64_cortex-a53/*.ipk
+            openwrt/addon/packages/aarch64_cortex-a53/SHA256SUMS
+            openwrt/addon/README.md
