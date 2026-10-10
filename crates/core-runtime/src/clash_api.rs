@@ -599,7 +599,14 @@ async fn handle_parse_route(
     match parsed {
         Ok(outbound) => respond_json(stream, 200, "OK", &outbound, cors).await?,
         Err(message) => {
-            respond_json(stream, 400, "Bad Request", &json!({"message": message}), cors).await?
+            respond_json(
+                stream,
+                400,
+                "Bad Request",
+                &json!({"message": message}),
+                cors,
+            )
+            .await?
         }
     }
     Ok(true)

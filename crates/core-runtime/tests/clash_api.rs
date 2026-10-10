@@ -332,7 +332,12 @@ async fn clash_api_rest_surface() {
     )
     .await;
     assert_eq!(res.status, 400);
-    assert!(res.json()["message"].as_str().unwrap().contains("naive+https"));
+    assert!(
+        res.json()["message"]
+            .as_str()
+            .unwrap()
+            .contains("naive+https")
+    );
 
     let res = request(addr, &authed("/proxies/sel")).await;
     assert_eq!(res.status, 200);
