@@ -51,7 +51,7 @@ See the [OpenWrt package guide](openwrt/addon/README.md) for package details and
 
 > Packages are checked in under [`openwrt/addon/packages/aarch64_cortex-a53/`](openwrt/addon/packages/aarch64_cortex-a53/).
 > Package releases are published manually from Actions → **Tachyon Core fork release**.
-> Upstream Core releases are checked daily; the workflow opens a PR after verifying the binary and tests. See [package maintenance](openwrt/addon/scripts/README.md).
+> Stable upstream releases are checked daily: the workflow syncs the source into this fork, verifies the binary and tests, then opens a PR. See [package maintenance](openwrt/addon/scripts/README.md).
 
 ## ⚡ About the tachyon-core engine
 

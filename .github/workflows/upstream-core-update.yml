@@ -19,6 +19,7 @@ jobs:
       update: ${{ steps.check.outputs.update }}
       version: ${{ steps.check.outputs.version }}
       package_release: ${{ steps.check.outputs.package_release }}
+      upstream_commit: ${{ steps.check.outputs.upstream_commit }}
     steps:
       - name: Check out fork
         uses: actions/checkout@v4
@@ -39,6 +40,12 @@ jobs:
             exit 1
           fi
           echo "Latest stable upstream release: $tag"
+          upstream_commit="$(curl -fsSL --retry 3 \
+            "https://api.github.com/repos/Dushnilin/tachyon-core/commits/$tag" | jq -r .sha)"
+          [[ "$upstream_commit" =~ ^[[:xdigit:]]{40}$ ]] || {
+            echo "::error::Could not resolve upstream commit for $tag"
+            exit 1
+          }
 
           mapfile -t current_packages < <(find "$package_dir" -maxdepth 1 -type f \
             -name 'tachyon-core_*_aarch64_cortex-a53.ipk' -print)
@@ -74,6 +81,7 @@ jobs:
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "package_release=$package_release" >> "$GITHUB_OUTPUT"
+          echo "upstream_commit=$upstream_commit" >> "$GITHUB_OUTPUT"
           echo "update=true" >> "$GITHUB_OUTPUT"
 
   build:
@@ -84,9 +92,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out fork patch
+      - name: Check out fork history
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Rust for the OpenWrt target
@@ -95,7 +104,7 @@ jobs:
           targets: aarch64-unknown-linux-musl
           components: rustfmt
 
-      - name: Verify upstream release, apply fork patch, test, and build
+      - name: Verify upstream release, sync source, test, and build
         run: |
           set -euo pipefail
           version="${{ needs.check.outputs.version }}"
@@ -103,7 +112,6 @@ jobs:
           asset="tachyon-core-aarch64-${tag}.tar.gz"
           upstream_binary="tachyon-core-aarch64-${tag}"
           download_dir="$RUNNER_TEMP/upstream"
-          source_dir="$RUNNER_TEMP/upstream-source"
           mkdir -p "$download_dir"
 
           base_url="https://github.com/Dushnilin/tachyon-core/releases/download/${tag}"
@@ -120,28 +128,28 @@ jobs:
           readelf -h "$download_dir/$upstream_binary" > "$download_dir/upstream-elf.txt"
           grep -q 'Machine:.*AArch64' "$download_dir/upstream-elf.txt"
 
-          upstream_commit="$(curl -fsSL --retry 3 \
-            "https://api.github.com/repos/Dushnilin/tachyon-core/commits/$tag" | jq -r .sha)"
-          git clone --depth 1 --branch "$tag" \
-            https://github.com/Dushnilin/tachyon-core.git "$source_dir"
-          checked_out_commit="$(git -C "$source_dir" rev-parse HEAD)"
-          [[ "$checked_out_commit" == "$upstream_commit" ]] || {
-            echo "::error::Checked out source does not match upstream release tag $tag"
+          upstream_ref="refs/tags/upstream-${tag}"
+          git fetch --no-tags https://github.com/Dushnilin/tachyon-core.git \
+            "refs/tags/$tag:$upstream_ref"
+          checked_out_commit="$(git rev-parse "$upstream_ref^{commit}")"
+          [[ "$checked_out_commit" == "${{ needs.check.outputs.upstream_commit }}" ]] || {
+            echo "::error::Fetched source does not match upstream release tag $tag"
             exit 1
           }
 
-          if ! grep -q 'parse_naive_share_link' "$source_dir/crates/core-runtime/src/clash_api.rs"; then
-            gzip -dc openwrt/addon/patches/tachyon-core-naiveproxy-api.patch.gz |
-              patch --directory="$source_dir" --strip=1 --batch
-          fi
-          grep -q 'parse_naive_share_link' "$source_dir/crates/core-runtime/src/clash_api.rs"
-          grep -Fq 'POST /parse' "$source_dir/crates/core-runtime/tests/clash_api.rs"
+          git merge --squash "$upstream_ref"
+          grep -q 'parse_naive_share_link' crates/core-runtime/src/clash_api.rs
+          grep -Fq 'POST /parse' crates/core-runtime/tests/clash_api.rs
+          source_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "$source_version" == "$version" ]] || {
+            echo "::error::Merged Cargo workspace version $source_version does not match $tag"
+            exit 1
+          }
 
-          cd "$source_dir"
           cargo fmt --all -- --check
           cargo test --locked -p core-runtime --test clash_api
           cargo build --locked --release --target aarch64-unknown-linux-musl --bin tachyon-core
-          built_binary="$source_dir/target/aarch64-unknown-linux-musl/release/tachyon-core"
+          built_binary="$GITHUB_WORKSPACE/target/aarch64-unknown-linux-musl/release/tachyon-core"
           readelf -h "$built_binary" > "$download_dir/built-elf.txt"
           grep -q 'Machine:.*AArch64' "$download_dir/built-elf.txt"
           if readelf -l "$built_binary" > "$download_dir/built-program-headers.txt" &&
@@ -174,6 +182,8 @@ jobs:
     steps:
       - name: Check out fork
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download built Core binary
         uses: actions/download-artifact@v4
@@ -185,8 +195,22 @@ jobs:
         env:
           VERSION: ${{ needs.check.outputs.version }}
           PACKAGE_RELEASE: ${{ needs.check.outputs.package_release }}
+          UPSTREAM_COMMIT: ${{ needs.check.outputs.upstream_commit }}
         run: |
           set -euo pipefail
+          trusted_packager="$RUNNER_TEMP/repackage_core.py"
+          cp openwrt/addon/scripts/repackage_core.py "$trusted_packager"
+
+          upstream_ref="refs/tags/upstream-v${VERSION}"
+          git fetch --no-tags https://github.com/Dushnilin/tachyon-core.git \
+            "refs/tags/v${VERSION}:$upstream_ref"
+          checked_out_commit="$(git rev-parse "$upstream_ref^{commit}")"
+          [[ "$checked_out_commit" == "$UPSTREAM_COMMIT" ]] || {
+            echo "::error::Fetched source does not match the checked release tag"
+            exit 1
+          }
+          git merge --squash "$upstream_ref"
+
           package_dir="openwrt/addon/packages/aarch64_cortex-a53"
           binary="$RUNNER_TEMP/core-update/tachyon-core"
           [[ -f "$binary" && ! -L "$binary" ]] || {
@@ -198,14 +222,14 @@ jobs:
           [[ "${#current_packages[@]}" -eq 1 ]]
 
           new_package="$package_dir/tachyon-core_${VERSION}-${PACKAGE_RELEASE}_aarch64_cortex-a53.ipk"
-          python3 openwrt/addon/scripts/repackage_core.py build \
+          python3 "$trusted_packager" build \
             --base-package "${current_packages[0]}" \
             --binary "$binary" \
             --version "$VERSION" \
             --package-release "$PACKAGE_RELEASE" \
             --output "$new_package"
           rm "${current_packages[0]}"
-          python3 openwrt/addon/scripts/repackage_core.py verify \
+          python3 "$trusted_packager" verify \
             "$new_package" --version "$VERSION" --package-release "$PACKAGE_RELEASE" \
             --binary "$binary"
 
@@ -249,9 +273,9 @@ jobs:
             [v${{ needs.check.outputs.version }}](https://github.com/Dushnilin/tachyon-core/releases/tag/v${{ needs.check.outputs.version }}).
 
             The upstream ARM64 release binary passed the official `SHA256SUMS`
-            check, and the source checkout matches the release tag. The package
-            binary is rebuilt from tagged source with the fork's `POST /parse`
-            NaiveProxy patch applied.
+            check, and the fetched source matches the release tag. The tagged
+            upstream history is merged into the fork before testing and building,
+            preserving fork-specific changes such as NaiveProxy `POST /parse`.
 
             `cargo fmt --all -- --check` and
             `cargo test --locked -p core-runtime --test clash_api` passed before

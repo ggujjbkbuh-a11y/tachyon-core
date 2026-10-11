@@ -17,8 +17,9 @@
   локализация для `aarch64_cortex-a53`, с `SHA256SUMS`.
 - Добавлен OpenWrt-установщик и workflow для публикации пакетов в Releases.
 - Добавлена ежедневная проверка новых стабильных релизов upstream: workflow
-  сверяет официальный checksum, накладывает патч NaiveProxy, собирает Core,
-  запускает тесты и предлагает обновление отдельным PR.
+  проверяет официальный checksum, переносит upstream-коммиты в форк,
+  сохраняет изменения NaiveProxy, собирает Core, запускает тесты и предлагает
+  обновление отдельным PR.
 
 Установка по SSH от root:
 wget -O /tmp/tachyon-addon-install.sh https://raw.githubusercontent.com/ggujjbkbuh-a11y/tachyon-core/main/openwrt/addon/install.sh

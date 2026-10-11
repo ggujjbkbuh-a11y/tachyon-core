@@ -50,8 +50,9 @@ includes `naive+https://` URL validation and protocol display.
 ## Updating from upstream
 
 The `Check tachyon-core upstream release` workflow polls the latest stable
-upstream release daily. It verifies the official ARM64 binary checksum, applies
-the fork's NaiveProxy Clash API patch to the tagged source, builds the static
-OpenWrt binary, runs the Clash API tests, and opens a pull request for review.
-It does not merge the update or publish a package release automatically. See
+upstream release daily. It verifies the official ARM64 binary checksum, merges
+the tagged upstream history into the fork, builds the static OpenWrt binary,
+runs the Clash API tests, and opens a pull request for review. Merge conflicts
+or failed tests stop the update. The workflow does not merge the PR or publish
+a package release automatically. See
 [`scripts/README.md`](scripts/README.md) for package maintenance details.
