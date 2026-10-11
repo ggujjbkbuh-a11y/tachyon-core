@@ -135,7 +135,7 @@ jobs:
               patch --directory="$source_dir" --strip=1 --batch
           fi
           grep -q 'parse_naive_share_link' "$source_dir/crates/core-runtime/src/clash_api.rs"
-          grep -q 'parses_naive_share_links' "$source_dir/crates/core-runtime/tests/clash_api.rs"
+          grep -Fq 'POST /parse' "$source_dir/crates/core-runtime/tests/clash_api.rs"
 
           cd "$source_dir"
           cargo fmt --all -- --check
