@@ -9,6 +9,7 @@ pub mod rule_set;
 pub mod rule_set_index;
 pub mod rule_set_remote;
 pub mod sniff;
+mod sniff_quic;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -37,6 +38,7 @@ use crate::outbound::direct::Direct;
 use crate::outbound::fptn::Fptn;
 use crate::outbound::hysteria2::Hysteria2;
 use crate::outbound::masque::Masque;
+use crate::outbound::mieru::Mieru;
 use crate::outbound::naive::Naive;
 use crate::outbound::openvpn::OpenVpn;
 use crate::outbound::proxy::{HttpOut, Selector, Socks};
@@ -81,10 +83,13 @@ pub struct ConnContext {
     pub sniff_prefix: Vec<u8>,
     pub sniff_error: Option<SniffError>,
     pub sniffer_names: Vec<String>,
+    /// A packet sniff that wants another datagram: how long to wait for it.
+    pub sniff_timeout: Option<Duration>,
     pub ip_version: Option<u8>,
     pub route_original_destination: Option<Target>,
-    /// Clash connection view: the rule that produced the decision.
-    pub matched_rule: Option<(String, String)>,
+    /// Clash connection view: `<rule> => <action>` of the rule that produced
+    /// the decision.
+    pub matched_rule: Option<String>,
     /// `route.find_neighbor`: the client's hardware address, when the
     /// neighbour tables know it.
     pub source_mac: Option<neighbor::MacAddr>,
@@ -120,6 +125,7 @@ impl Default for ConnContext {
             sniff_prefix: Vec::new(),
             sniff_error: None,
             sniffer_names: Vec::new(),
+            sniff_timeout: None,
             ip_version: None,
             route_original_destination: None,
             matched_rule: None,
@@ -164,6 +170,7 @@ pub enum Outbound {
     Fptn(Fptn),
     Masque(Masque),
     Snell(Snell),
+    Mieru(Mieru),
     Tuic(Tuic),
     WireGuard(WireGuard),
     OpenVpn(OpenVpn),
@@ -200,6 +207,7 @@ impl Outbound {
             Outbound::Fptn(fptn) => fptn.connect(target).await.map(Conn::Plain),
             Outbound::Masque(masque) => masque.connect(target).await.map(Conn::Plain),
             Outbound::Snell(snell) => snell.connect(target).await.map(Conn::Plain),
+            Outbound::Mieru(mieru) => mieru.connect(target).await.map(Conn::Plain),
             Outbound::Tuic(tuic) => tuic.connect(target).await.map(Conn::Plain),
             Outbound::WireGuard(wg) => wg.connect(target).await.map(Conn::Plain),
             Outbound::OpenVpn(ovpn) => ovpn.connect(target).await.map(Conn::Plain),
@@ -229,6 +237,7 @@ impl Outbound {
             Outbound::Vmess(vmess) => vmess.connect_udp(target).await,
             Outbound::Trojan(trojan) => trojan.connect_udp(target).await,
             Outbound::Snell(snell) => snell.connect_udp(target).await,
+            Outbound::Mieru(mieru) => mieru.connect_udp(target).await,
             Outbound::Tuic(tuic) => tuic.connect_udp(target).await,
             Outbound::WireGuard(wg) => wg.connect_udp(target).await,
             Outbound::OpenVpn(ovpn) => ovpn.connect_udp(target).await,
@@ -272,6 +281,7 @@ impl Outbound {
             Outbound::ShadowTls(s) => apply(&mut s.dial),
             Outbound::Naive(n) => apply(&mut n.dial),
             Outbound::Snell(s) => apply(&mut s.dial),
+            Outbound::Mieru(m) => apply(&mut m.dial),
             _ => {}
         }
     }
@@ -297,6 +307,7 @@ impl Outbound {
             "fptn" => Ok(Outbound::Fptn(Fptn::build(obj, at)?)),
             "masque" => Ok(Outbound::Masque(Masque::build(obj, at)?)),
             "snell" => Ok(Outbound::Snell(Snell::build(obj, at)?)),
+            "mieru" => Ok(Outbound::Mieru(Mieru::build(obj, at)?)),
             "tuic" => Ok(Outbound::Tuic(Tuic::build(obj, at)?)),
             "naive" => Ok(Outbound::Naive(Naive::build(obj, at)?)),
             "anytls" => Ok(Outbound::AnyTls(AnyTls::build(obj, at)?)),
@@ -677,20 +688,26 @@ fn detect_default_interface() -> Option<String> {
     }
 }
 
-pub struct Router {
-    outbounds: Vec<Outbound>,
-    tags: HashMap<String, usize>,
-    default: usize,
-    rules: Vec<Rule>,
-    defaults: RouteDefaults,
-    rule_sets: Option<rule_set::RuleSetRegistry>,
+pub struct RouterInner {
+    pub(crate) outbounds: Vec<Outbound>,
+    pub(crate) tags: HashMap<String, usize>,
+    pub(crate) default: usize,
+    pub(crate) rules: Vec<Rule>,
+    pub(crate) defaults: RouteDefaults,
+    pub(crate) rule_sets: Option<Arc<rule_set::RuleSetRegistry>>,
     /// `route.find_process`, or any rule that names a process: the `/proc`
     /// walk per connection is only worth it when something will read it.
-    find_process: bool,
-    probe_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    pub(crate) find_process: bool,
+    pub(crate) probe_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Clash `DelayHistory` slots, one per outbound: reference keeps a
     /// single record per proxy, replaced by every successful probe.
-    delay_history: Vec<std::sync::Mutex<Option<(String, u32)>>>,
+    pub(crate) delay_history: Vec<std::sync::Mutex<Option<(String, u32)>>>,
+    /// Inbound tag -> type, for the `type/tag` of a Clash connection.
+    pub(crate) inbound_types: HashMap<String, String>,
+}
+
+pub struct Router {
+    inner: std::sync::RwLock<Arc<RouterInner>>,
 }
 
 /// A `local` DNS server with `neighbor_domain` answers from the same tables.
@@ -708,7 +725,7 @@ fn neighbor_domain_configured(root: &Value) -> bool {
         })
 }
 
-impl Router {
+impl RouterInner {
     /// The registry both routers share, remote sets included.
     pub fn rule_sets(&self) -> &rule_set::RuleSetRegistry {
         self.rule_sets
@@ -720,23 +737,13 @@ impl Router {
     pub fn defaults(&self) -> &RouteDefaults {
         &self.defaults
     }
-}
 
-impl Router {
     /// Abort the urltest probe loops (called on instance shutdown).
     pub fn take_probe_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
         std::mem::take(&mut *self.probe_tasks.lock().expect("probe tasks"))
     }
-}
 
-impl Router {
     /// Clash `DelayHistory`: record a successful probe against `index`.
-    ///
-    /// Selectors and urltest groups resolve to their current selection, so
-    /// one probe updates the whole `now` chain with a single timestamp —
-    /// the observable reference behaviour (a delay run on a member shows up
-    /// on the member, its urltest group and the selector above it).
-    /// Failures never record, matching the reference.
     pub fn record_delay(&self, index: usize, delay: u32) {
         let index = self.delay_provenance_index(index);
         let Some(slot) = self.delay_history.get(index) else {
@@ -775,12 +782,8 @@ impl Router {
         }
         index
     }
-}
 
-impl Router {
-    pub fn new(root: &Value) -> anyhow::Result<Arc<Router>> {
-        // Token outbounds (`{"type":"fptn","token":…}`) expand into one
-        // member outbound per server plus a urltest group first.
+    pub(crate) fn build(root: &Value) -> anyhow::Result<Self> {
         let expanded = core_config::fptn::expand(root).map_err(|e| anyhow::anyhow!("{e}"))?;
         let root: Cow<'_, Value> = match expanded {
             Some(value) => Cow::Owned(value),
@@ -829,8 +832,6 @@ impl Router {
             let outbound = match ty {
                 "wireguard" => Outbound::WireGuard(WireGuard::build(map, &at)?),
                 "openvpn-client" => Outbound::OpenVpn(OpenVpn::build(map, &at)?),
-                // Validated exactly like the reference, but the dataplane is
-                // not implemented: fail at start instead of silently skipping.
                 "openconnect" => anyhow::bail!(
                     "{at}: openconnect client is not implemented yet (config check parity only)"
                 ),
@@ -896,9 +897,7 @@ impl Router {
             }
             None => 0,
         };
-        // `route.find_neighbor`, a rule that asks for the client's MAC or
-        // hostname, or a `local` DNS server with `neighbor_domain`: any of
-        // them needs the tables the reference builds once per process.
+
         let lease_files: Vec<String> = root
             .get("route")
             .and_then(|route| route.get("dhcp_lease_files"))
@@ -912,8 +911,6 @@ impl Router {
                 _ => Vec::new(),
             })
             .unwrap_or_default();
-        // `route.find_process`, or any rule that names a process: either way
-        // the searcher runs, once per connection
         let find_process = root
             .get("route")
             .and_then(|route| route.get("find_process"))
@@ -931,24 +928,34 @@ impl Router {
         let delay_history = (0..outbounds.len())
             .map(|_| std::sync::Mutex::new(None))
             .collect();
-        let router = Arc::new(Router {
+        let inbound_types = root
+            .get("inbounds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|inbound| {
+                let tag = inbound.get("tag").and_then(Value::as_str)?;
+                let ty = inbound.get("type").and_then(Value::as_str)?;
+                Some((tag.to_string(), ty.to_string()))
+            })
+            .collect();
+        Ok(RouterInner {
             outbounds,
             tags,
             default,
             rules,
             defaults,
-            rule_sets: Some(registry),
+            rule_sets: Some(Arc::new(registry)),
             find_process,
             probe_tasks: std::sync::Mutex::new(Vec::new()),
             delay_history,
-        });
-        for outbound in &router.outbounds {
-            if let Outbound::Urltest(urltest) = outbound {
-                let handle = urltest.spawn(Arc::clone(&router));
-                router.probe_tasks.lock().expect("probe tasks").push(handle);
-            }
-        }
-        Ok(router)
+            inbound_types,
+        })
+    }
+
+    /// The configured type of the inbound tagged `tag`.
+    pub fn inbound_type(&self, tag: &str) -> Option<&str> {
+        self.inbound_types.get(tag).map(String::as_str)
     }
 
     /// Start listening endpoints (e.g. WireGuard server listeners).
@@ -956,6 +963,8 @@ impl Router {
         for outbound in &self.outbounds {
             if let Outbound::WireGuard(wg) = outbound {
                 wg.start_listen().await?;
+            } else if let Outbound::Tailscale(ts) = outbound {
+                ts.shared().await?;
             }
         }
         Ok(())
@@ -983,8 +992,7 @@ impl Router {
         })
     }
 
-    /// Tag of the outbound `route.final` points at (empty when untagged).
-    /// \ view: per rule, the Clash condition items and the
+    /// Clash view: per rule, the Clash condition items and the
     /// outbound they select.
     pub fn clash_rules(&self) -> Vec<(String, String, String)> {
         self.rules.iter().map(|rule| rule.clash_view()).collect()
@@ -1015,59 +1023,23 @@ impl Router {
         }
     }
 
-    pub fn connect<'a>(
-        &'a self,
-        target: &'a Target,
-    ) -> Pin<Box<dyn Future<Output = io::Result<Conn>> + Send + 'a>> {
-        self.connect_index(self.default, target)
-    }
-
-    /// dyn-erased so selector chains do not form an infinitely sized future.
-    pub fn connect_index<'a>(
-        &'a self,
-        index: usize,
-        target: &'a Target,
-    ) -> Pin<Box<dyn Future<Output = io::Result<Conn>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(outbound) = self.outbounds.get(index) else {
-                return Err(io::Error::other("outbound index out of range"));
-            };
-            outbound.connect(self, target).await
-        })
-    }
-
-    /// UDP dial through a specific outbound (selector/urltest chain-safe).
-    pub fn connect_udp_index<'a>(
-        &'a self,
-        index: usize,
-        target: &'a Target,
-    ) -> Pin<Box<dyn Future<Output = io::Result<tokio::net::UdpSocket>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(outbound) = self.outbounds.get(index) else {
-                return Err(io::Error::other("outbound index out of range"));
-            };
-            outbound.connect_udp(self, target).await
-        })
-    }
-
-    /// Walk `route.rules` for one connection: prepare metadata, apply phase-A
-    /// options, run phase-B sniff/resolve, stop on a terminal action.
-    pub async fn route<S>(&self, client: &mut S, ctx: &mut ConnContext) -> io::Result<Decision>
+    pub async fn route_walk<S>(
+        &self,
+        client: Option<&mut S>,
+        ctx: &mut ConnContext,
+    ) -> io::Result<Decision>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        self.route_walk(Some(client), ctx).await
+        self.walk(client, None, ctx).await
     }
 
-    /// Rule walk without a client stream (HTTP plain forward: the request
-    /// head is already consumed and `protocol` is set, so sniff is skipped).
-    pub async fn route_raw(&self, ctx: &mut ConnContext) -> io::Result<Decision> {
-        self.route_walk::<tokio::net::TcpStream>(None, ctx).await
-    }
-
-    async fn route_walk<S>(
+    /// One walk of the rules. A `sniff` action reads the stream when there is
+    /// one, and looks at the datagrams when there are those instead.
+    async fn walk<S>(
         &self,
         mut client: Option<&mut S>,
+        datagrams: Option<&[&[u8]]>,
         ctx: &mut ConnContext,
     ) -> io::Result<Decision>
     where
@@ -1094,10 +1066,17 @@ impl Router {
                 Action::Sniff { sniffer, timeout } => {
                     if let Some(c) = client.as_deref_mut() {
                         sniff::action_sniff(c, ctx, sniffer, *timeout).await;
+                    } else if let Some(datagrams) = datagrams {
+                        sniff::action_sniff_packet(datagrams, ctx, sniffer, *timeout);
                     }
                 }
                 Action::Resolve(res) => {
-                    action_resolve(ctx, res).await?;
+                    if let Err(err) = action_resolve(ctx, res).await {
+                        logging::debug(format_args!(
+                            "route: resolve failed for {}: {err}",
+                            ctx.destination
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -1126,6 +1105,223 @@ impl Router {
     fn outbound_index(&self, tag: &str) -> io::Result<usize> {
         self.index_of(tag)
             .ok_or_else(|| io::Error::other(format!("outbound not found: {tag}")))
+    }
+}
+
+impl Router {
+    pub fn new(root: &Value) -> anyhow::Result<Arc<Router>> {
+        let inner = RouterInner::build(root)?;
+        let router = Arc::new(Router {
+            inner: std::sync::RwLock::new(Arc::new(inner)),
+        });
+        let inner_ref = router.inner();
+        for outbound in &inner_ref.outbounds {
+            if let Outbound::Urltest(urltest) = outbound {
+                let handle = urltest.spawn(Arc::clone(&router));
+                inner_ref
+                    .probe_tasks
+                    .lock()
+                    .expect("probe tasks")
+                    .push(handle);
+            }
+        }
+        Ok(router)
+    }
+
+    pub fn inner(&self) -> Arc<RouterInner> {
+        self.inner.read().expect("router inner lock").clone()
+    }
+
+    pub fn rule_sets(&self) -> Arc<rule_set::RuleSetRegistry> {
+        self.inner()
+            .rule_sets
+            .as_ref()
+            .expect("route registry built in Router::new")
+            .clone()
+    }
+
+    pub fn defaults(&self) -> RouteDefaults {
+        self.inner().defaults.clone()
+    }
+
+    pub fn take_probe_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        self.inner().take_probe_tasks()
+    }
+
+    pub fn record_delay(&self, index: usize, delay: u32) {
+        self.inner().record_delay(index, delay);
+    }
+
+    pub fn delay_history(&self, index: usize) -> Option<(String, u32)> {
+        self.inner().delay_history(index)
+    }
+
+    pub fn default_index(&self) -> usize {
+        self.inner().default_index()
+    }
+
+    pub fn index_of(&self, tag: &str) -> Option<usize> {
+        self.inner().index_of(tag)
+    }
+
+    pub fn default_tag(&self) -> String {
+        self.inner().default_tag().to_string()
+    }
+
+    pub fn clash_rules(&self) -> Vec<(String, String, String)> {
+        self.inner().clash_rules()
+    }
+
+    pub fn select_member(&self, group_tag: &str, member: &str) -> Result<bool, SelectError> {
+        self.inner().select_member(group_tag, member)
+    }
+
+    pub fn start_endpoints<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+        let inner = self.inner();
+        Box::pin(async move { inner.start_endpoints().await })
+    }
+
+    pub fn connect<'a>(
+        &'a self,
+        target: &'a Target,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Conn>> + Send + 'a>> {
+        self.connect_index(self.default_index(), target)
+    }
+
+    pub fn connect_index<'a>(
+        &'a self,
+        index: usize,
+        target: &'a Target,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Conn>> + Send + 'a>> {
+        let inner = self.inner();
+        Box::pin(async move {
+            let Some(outbound) = inner.outbounds.get(index) else {
+                return Err(io::Error::other("outbound index out of range"));
+            };
+            outbound.connect(self, target).await
+        })
+    }
+
+    pub fn connect_udp_index<'a>(
+        &'a self,
+        index: usize,
+        target: &'a Target,
+    ) -> Pin<Box<dyn Future<Output = io::Result<tokio::net::UdpSocket>> + Send + 'a>> {
+        let inner = self.inner();
+        Box::pin(async move {
+            let Some(outbound) = inner.outbounds.get(index) else {
+                return Err(io::Error::other("outbound index out of range"));
+            };
+            outbound.connect_udp(self, target).await
+        })
+    }
+
+    pub async fn route<S>(&self, client: &mut S, ctx: &mut ConnContext) -> io::Result<Decision>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.inner().route_walk(Some(client), ctx).await
+    }
+
+    pub async fn route_raw(&self, ctx: &mut ConnContext) -> io::Result<Decision> {
+        self.inner()
+            .route_walk::<tokio::net::TcpStream>(None, ctx)
+            .await
+    }
+
+    /// Route a UDP flow by its datagrams so far (first one first). They are
+    /// only looked at: nothing is consumed or changed.
+    pub async fn route_packet(
+        &self,
+        ctx: &mut ConnContext,
+        datagrams: &[&[u8]],
+    ) -> io::Result<Decision> {
+        self.inner()
+            .walk::<tokio::net::TcpStream>(None, Some(datagrams), ctx)
+            .await
+    }
+
+    pub fn build_inner(root: &Value) -> anyhow::Result<RouterInner> {
+        RouterInner::build(root)
+    }
+
+    pub async fn apply_inner(self: &Arc<Self>, mut new_inner: RouterInner) -> anyhow::Result<()> {
+        let old_inner = self.inner();
+
+        // A new control stream for an unchanged identity would replace the old
+        // stream, and a second UDP bind would fail. Preserve the whole endpoint.
+        for (tag, &old_idx) in &old_inner.tags {
+            if let Some(Outbound::Tailscale(old)) = old_inner.outbounds.get(old_idx) {
+                let inherited = match new_inner
+                    .tags
+                    .get(tag)
+                    .and_then(|index| new_inner.outbounds.get_mut(*index))
+                {
+                    Some(Outbound::Tailscale(new)) => new.inherit(old),
+                    _ => false,
+                };
+                if !inherited {
+                    old.shutdown().await;
+                }
+            }
+        }
+
+        // 1. Preserve delay history by tag across reloads
+        for (tag, &old_idx) in &old_inner.tags {
+            if let Some(hist) = old_inner.delay_history(old_idx)
+                && let Some(&new_idx) = new_inner.tags.get(tag)
+                && let Some(slot) = new_inner.delay_history.get(new_idx)
+            {
+                *slot.lock().expect("delay history") = Some(hist);
+            }
+        }
+
+        // 2. Preserve selector and urltest selections and latencies
+        for (tag, &old_idx) in &old_inner.tags {
+            if let Some(Outbound::Selector(old_sel)) = old_inner.outbounds.get(old_idx)
+                && let Some(&new_idx) = new_inner.tags.get(tag)
+                && let Some(Outbound::Selector(new_sel)) = new_inner.outbounds.get(new_idx)
+            {
+                let _ = new_sel.select(old_sel.now());
+            } else if let Some(Outbound::Urltest(old_url)) = old_inner.outbounds.get(old_idx)
+                && let Some(&new_idx) = new_inner.tags.get(tag)
+                && let Some(Outbound::Urltest(new_url)) = new_inner.outbounds.get(new_idx)
+            {
+                let _ = new_url.select(old_url.now());
+                new_url.copy_latencies_from(old_url);
+            }
+        }
+
+        // 3. Stop old urltest probe tasks
+        let old_tasks = old_inner.take_probe_tasks();
+        for task in old_tasks {
+            task.abort();
+        }
+
+        // 4. Atomically install new inner router
+        let new_inner = Arc::new(new_inner);
+        *self.inner.write().expect("router inner lock") = Arc::clone(&new_inner);
+
+        // 5. Spawn new urltest probe tasks using self (Arc<Router>)
+        for outbound in &new_inner.outbounds {
+            if let Outbound::Urltest(urltest) = outbound {
+                let handle = urltest.spawn(Arc::clone(self));
+                new_inner
+                    .probe_tasks
+                    .lock()
+                    .expect("probe tasks")
+                    .push(handle);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn reload(self: &Arc<Self>, root: &Value) -> anyhow::Result<()> {
+        let new_inner = RouterInner::build(root)?;
+        self.apply_inner(new_inner).await
     }
 }
 
@@ -1245,6 +1441,15 @@ async fn action_resolve(ctx: &mut ConnContext, action: &ResolveAction) -> io::Re
     ));
     if ctx.ip_version.is_none() && !addrs.is_empty() {
         ctx.ip_version = Some(if addrs[0].is_ipv6() { 6 } else { 4 });
+    }
+    if let Some(&ip) = addrs.first() {
+        if ctx.domain.is_none()
+            && let Target::Domain(ref h, _) = ctx.destination
+        {
+            ctx.domain = Some(h.clone());
+        }
+        let port = ctx.destination.port();
+        ctx.destination = Target::Ip(SocketAddr::new(ip, port));
     }
     ctx.destination_addresses = addrs;
     Ok(())
@@ -1385,7 +1590,10 @@ mod tests {
         prepare(&mut ctx, true);
         let owner = ctx.process.as_ref().expect("prepare found the owner");
         assert_eq!(owner.path, own.to_string_lossy(), "this very test binary");
-        assert!(router.rules[0].matches(&ctx), "and the rule matches it");
+        assert!(
+            router.inner().rules[0].matches(&ctx),
+            "and the rule matches it"
+        );
         drop((client, server));
     }
 
@@ -1420,7 +1628,7 @@ mod tests {
             "route": {"final": "d", "default_interface": "lo", "default_mark": 7}
         }))
         .unwrap();
-        match router.outbounds.first() {
+        match router.inner().outbounds.first() {
             Some(Outbound::Direct(d)) => {
                 assert_eq!(d.dial.bind_interface.as_deref(), Some("eth0"));
             }
@@ -1434,7 +1642,7 @@ mod tests {
                 "route": {"final": "d", "default_mark": 7}
             }))
             .unwrap();
-            match router.outbounds.first() {
+            match router.inner().outbounds.first() {
                 Some(Outbound::Direct(d)) => assert_eq!(d.dial.routing_mark, Some(99)),
                 _ => panic!("expected direct outbound"),
             }
@@ -1456,8 +1664,8 @@ mod tests {
             "route": {"final": "d1"}
         }))
         .unwrap();
-        let d1 = router.tags["d1"];
-        let sel = router.tags["sel"];
+        let d1 = router.inner().tags["d1"];
+        let sel = router.inner().tags["sel"];
 
         assert!(router.delay_history(d1).is_none(), "no probe, no record");
         router.record_delay(d1, 654);
@@ -1479,6 +1687,42 @@ mod tests {
         router.record_delay(d1, 700);
         let (_, delay) = router.delay_history(d1).expect("recorded");
         assert_eq!(delay, 700, "one slot, replaced per probe");
+    }
+
+    #[tokio::test]
+    async fn router_hot_reload_migrates_delay_and_selectors() {
+        let root1 = json!({
+            "outbounds": [
+                {"type": "direct", "tag": "d1"},
+                {"type": "direct", "tag": "d2"},
+                {"type": "selector", "tag": "sel", "outbounds": ["d1", "d2"]}
+            ],
+            "route": {"final": "d1"}
+        });
+        let router = Router::new(&root1).unwrap();
+        let d2 = router.index_of("d2").unwrap();
+        router.record_delay(d2, 123);
+        router.select_member("sel", "d2").unwrap();
+
+        // New config with reordered outbounds or added outbound:
+        let root2 = json!({
+            "outbounds": [
+                {"type": "direct", "tag": "d3"},
+                {"type": "direct", "tag": "d2"},
+                {"type": "direct", "tag": "d1"},
+                {"type": "selector", "tag": "sel", "outbounds": ["d1", "d2", "d3"]}
+            ],
+            "route": {"final": "d2"}
+        });
+        router.reload(&root2).await.unwrap();
+
+        // Verify delay history migrated for d2:
+        let new_d2 = router.index_of("d2").unwrap();
+        assert_eq!(router.delay_history(new_d2).unwrap().1, 123);
+
+        // Verify selector choice preserved:
+        let sel_idx = router.index_of("sel").unwrap();
+        assert_eq!(router.delay_history(sel_idx).unwrap().1, 123);
     }
 
     #[test]
@@ -1509,5 +1753,117 @@ mod tests {
         let e = reject_error(RejectMethod::Drop, false, &flood);
         assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
         assert!(!flood.trigger(), "drop method must not touch the counter");
+    }
+
+    #[tokio::test]
+    async fn action_resolve_failure_is_non_fatal_and_continues_routing() {
+        let config = json!({
+            "outbounds": [
+                {"type": "direct", "tag": "direct"},
+                {"type": "direct", "tag": "fallback"}
+            ],
+            "route": {
+                "rules": [
+                    {
+                        "domain_suffix": ["youtube.com"],
+                        "action": "resolve",
+                        "server": "non-existent-dns-server"
+                    },
+                    {
+                        "domain_suffix": ["youtube.com"],
+                        "action": "route",
+                        "outbound": "fallback"
+                    }
+                ],
+                "final": "direct"
+            }
+        });
+        let router = Router::new(&config).unwrap();
+        let mut ctx = ConnContext::new(
+            "tun",
+            "192.168.1.100:12345".parse().unwrap(),
+            Target::Domain("www.youtube.com".into(), 443),
+            "tcp",
+        );
+        let decision = router
+            .route_raw(&mut ctx)
+            .await
+            .expect("route should succeed despite resolve failure");
+        let Decision::Outbound(idx) = decision else {
+            panic!("expected outbound decision");
+        };
+        assert_eq!(idx, router.index_of("fallback").unwrap());
+    }
+
+    async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock().await
+    }
+
+    #[tokio::test]
+    async fn action_resolve_rewrites_destination_to_ip_and_preserves_domain() {
+        let _g = test_guard().await;
+        let dns_config = json!({
+            "dns": {
+                "servers": [
+                    {
+                        "type": "hosts",
+                        "tag": "local-dns",
+                        "predefined": {
+                            "www.youtube.com": "142.250.186.206"
+                        }
+                    }
+                ],
+                "final": "local-dns"
+            }
+        });
+        let dns = crate::dns::DnsService::build(&dns_config).unwrap().unwrap();
+        crate::dns::set_service(Some(dns));
+
+        let config = json!({
+            "outbounds": [
+                {"type": "direct", "tag": "direct"},
+                {"type": "direct", "tag": "yt-out"}
+            ],
+            "route": {
+                "rules": [
+                    {
+                        "domain_suffix": ["youtube.com"],
+                        "action": "resolve",
+                        "server": "local-dns"
+                    },
+                    {
+                        "domain_suffix": ["youtube.com"],
+                        "action": "route",
+                        "outbound": "yt-out"
+                    }
+                ],
+                "final": "direct"
+            }
+        });
+        let router = Router::new(&config).unwrap();
+        let mut ctx = ConnContext::new(
+            "tun",
+            "192.168.1.100:12345".parse().unwrap(),
+            Target::Domain("www.youtube.com".into(), 443),
+            "tcp",
+        );
+        let decision = router
+            .route_raw(&mut ctx)
+            .await
+            .expect("route should succeed");
+        let Decision::Outbound(idx) = decision else {
+            panic!("expected outbound decision");
+        };
+        assert_eq!(idx, router.index_of("yt-out").unwrap());
+        // Verify ctx.domain is preserved for subsequent rules
+        assert_eq!(ctx.domain.as_deref(), Some("www.youtube.com"));
+        // Verify ctx.destination is rewritten to resolved IP:
+        assert_eq!(
+            ctx.destination,
+            Target::Ip("142.250.186.206:443".parse().unwrap())
+        );
+
+        crate::dns::set_service(None);
     }
 }

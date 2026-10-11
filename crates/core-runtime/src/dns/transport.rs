@@ -22,6 +22,8 @@ pub(crate) const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// MagicDNS and split DNS from a running native Tailscale endpoint.
+    Tailscale,
     Udp,
     Tcp,
     Tls,
@@ -296,6 +298,28 @@ impl FakeIpStore {
         }
     }
 
+    pub fn prefixes(&self) -> (Option<IpPrefix>, Option<IpPrefix>) {
+        (self.v4, self.v6)
+    }
+
+    /// Migrate active FakeIP state from an earlier pool if the prefixes match.
+    pub fn migrate_from(&self, old: &FakeIpStore) {
+        if self.prefixes() != old.prefixes() {
+            return;
+        }
+        let old_state = old.state.lock().expect("old fakeip state");
+        let mut new_state = self.state.lock().expect("new fakeip state");
+        new_state.cur4 = old_state.cur4;
+        new_state.cur6 = old_state.cur6;
+        new_state.addr_to_domain = old_state.addr_to_domain.clone();
+        for (d, ip) in old_state.domain_to_v4.iter() {
+            new_state.domain_to_v4.put(d.clone(), *ip);
+        }
+        for (d, ip) in old_state.domain_to_v6.iter() {
+            new_state.domain_to_v6.put(d.clone(), *ip);
+        }
+    }
+
     pub fn contains(&self, ip: IpAddr) -> bool {
         self.v4.is_some_and(|p| p.contains(ip)) || self.v6.is_some_and(|p| p.contains(ip))
     }
@@ -422,6 +446,7 @@ impl ServerConfig {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("{at}: missing type"))?;
         let kind = match kind_raw {
+            "tailscale" => Kind::Tailscale,
             "udp" => Kind::Udp,
             "tcp" => Kind::Tcp,
             "tls" => Kind::Tls,
@@ -477,7 +502,11 @@ impl ServerConfig {
             .unwrap_or_default()
             .to_string();
         let server = map
-            .get("server")
+            .get(if kind == Kind::Tailscale {
+                "endpoint"
+            } else {
+                "server"
+            })
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
@@ -490,6 +519,7 @@ impl ServerConfig {
                 Kind::Https | Kind::H3 => 443,
                 Kind::Quic => 853,
                 Kind::Fakeip
+                | Kind::Tailscale
                 | Kind::Local
                 | Kind::Hosts
                 | Kind::Mdns
@@ -558,6 +588,7 @@ impl ServerConfig {
         let needs_server = !matches!(
             kind,
             Kind::Fakeip
+                | Kind::Tailscale
                 | Kind::Local
                 | Kind::Hosts
                 | Kind::Mdns
@@ -567,6 +598,9 @@ impl ServerConfig {
         );
         if needs_server && server.is_empty() {
             anyhow::bail!("{at}: missing server");
+        }
+        if kind == Kind::Tailscale && server.is_empty() {
+            anyhow::bail!("{at}: tailscale DNS requires endpoint");
         }
         let detour = map
             .get("detour")
@@ -769,6 +803,22 @@ pub async fn exchange(
 ) -> io::Result<Vec<u8>> {
     let fut = async {
         match cfg.kind {
+            Kind::Tailscale => {
+                let router = dialer.router.as_ref().ok_or_else(|| {
+                    io::Error::other("dns: Tailscale endpoint registry unavailable")
+                })?;
+                let inner = router.inner();
+                let endpoint = inner
+                    .outbound_table()
+                    .find_map(|(_, tag, outbound)| match outbound {
+                        crate::route::Outbound::Tailscale(endpoint) if tag == cfg.server => {
+                            Some(endpoint.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| io::Error::other("dns: Tailscale endpoint not found"))?;
+                endpoint.dns_exchange(query).await
+            }
             // mdns has no server address: the router runs it before it gets here
             Kind::Mdns => Err(io::Error::other("dns: mdns server has no address")),
             Kind::Udp => exchange_udp(dialer, cfg, addr, query).await,
@@ -809,27 +859,41 @@ async fn exchange_udp(
     query: &[u8],
 ) -> io::Result<Vec<u8>> {
     let socket = dialer.udp(cfg, addr).await?;
-    // Sockets connected via direct dial or loopback pair return EISCONN on Linux/POSIX
-    // if send_to is called with an address. Use send() on connected sockets,
-    // and fall back to send_to only if unconnected (ENOTCONN: 107 on Linux, 10057 on Windows).
-    match socket.send(query).await {
-        Ok(_) => {}
-        Err(e) if e.raw_os_error() == Some(107) || e.raw_os_error() == Some(10057) => {
-            socket.send_to(query, addr).await?;
+    let send_query = || async {
+        match socket.send(query).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(107) || e.raw_os_error() == Some(10057) => {
+                socket.send_to(query, addr).await.map(|_| ())
+            }
+            Err(e) => Err(e),
         }
-        Err(e) => return Err(e),
-    }
-    let mut buf = vec![0u8; 65535];
-    let n = match socket.recv(&mut buf).await {
-        Ok(n) => n,
-        Err(e) if e.raw_os_error() == Some(107) || e.raw_os_error() == Some(10057) => {
-            let (n, _from) = socket.recv_from(&mut buf).await?;
-            n
-        }
-        Err(e) => return Err(e),
     };
-    buf.truncate(n);
-    Ok(buf)
+    send_query().await?;
+
+    let mut buf = vec![0u8; 65535];
+    let retransmit_interval = Duration::from_millis(1500);
+    loop {
+        let recv_fut = async {
+            match socket.recv(&mut buf).await {
+                Ok(n) => Ok(n),
+                Err(e) if e.raw_os_error() == Some(107) || e.raw_os_error() == Some(10057) => {
+                    let (n, _from) = socket.recv_from(&mut buf).await?;
+                    Ok(n)
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match tokio::time::timeout(retransmit_interval, recv_fut).await {
+            Ok(Ok(n)) => {
+                buf.truncate(n);
+                return Ok(buf);
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                let _ = send_query().await;
+            }
+        }
+    }
 }
 
 async fn exchange_stream(

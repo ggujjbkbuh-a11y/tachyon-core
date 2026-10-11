@@ -221,6 +221,7 @@ const NESTED_ACTION_KEYS: &[&str] = &[
     "udp_connect",
     "udp_disable_domain_unmapping",
     "tls_fragment",
+    "tls_fragment_fallback_delay",
     "tls_record_fragment",
     "tls_spoof",
     "tls_spoof_method",
@@ -249,6 +250,7 @@ const KNOWN_INBOUND_TYPES: &[&str] = &[
     "snell",
     "cloudflared",
     "fptn",
+    "mieru",
 ];
 
 const KNOWN_OUTBOUND_TYPES: &[&str] = &[
@@ -275,6 +277,7 @@ const KNOWN_OUTBOUND_TYPES: &[&str] = &[
     "snell",
     "wireguard",
     "fptn",
+    "mieru",
     "dns",
     "bridge",
 ];
@@ -733,6 +736,7 @@ const INBOUND_LISTEN_STRUCT: &[(&str, &str)] = &[
     ("tuic", "TUICInboundOptions"),
     ("snell", "SnellInboundOptions"),
     ("fptn", "FPTNInboundOptions"),
+    ("mieru", "MieruInboundOptions"),
 ];
 
 /// Fields each simple inbound type declares beyond `ListenOptions` and the
@@ -864,6 +868,7 @@ const INBOUND_OWN_FIELDS: &[(&str, &[&str])] = &[
             "endpoint_independent_nat",
         ],
     ),
+    ("mieru", &["users", "transport"]),
     (
         "fptn",
         &[
@@ -3248,6 +3253,14 @@ fn validate_inbound_fields(i: usize, ty: &str, obj: &Map<String, Value>) -> Resu
             // or the XHTTP download/upload requests, then the protocol bytes
             continue;
         }
+        if field == "transport"
+            && value
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("tcp"))
+        {
+            // mieru's own `transport` is a plain "TCP" string, not a v2ray object
+            continue;
+        }
         return Err(format!(
             "{at}.{field}: server-side {field} is not implemented yet, so nothing \
              would read this field and the listener would serve nothing: \
@@ -4653,11 +4666,13 @@ const ROUTE_RULE_FIELDS: &[&str] = &[
     "invert",
     "ip_cidr",
     "ip_is_private",
+    "ip_version",
     "method",
     "mode",
     "network",
     "network_is_constrained",
     "network_is_expensive",
+    "network_strategy",
     "network_type",
     "no_drop",
     "outbound",
@@ -4688,11 +4703,13 @@ const ROUTE_RULE_FIELDS: &[&str] = &[
     "strategy",
     "timeout",
     "tls_fragment",
+    "tls_fragment_fallback_delay",
     "tls_record_fragment",
     "tls_spoof",
     "type",
     "udp_connect",
     "udp_disable_domain_unmapping",
+    "udp_timeout",
     "user",
     "user_id",
     "wifi_bssid",
@@ -4840,6 +4857,22 @@ fn validate_route_rule(rule: &Value, at: &str, nested: bool) -> Result<(), Strin
     if let Some(value) = rule.get("rule_set").filter(|value| !prunes_value(value)) {
         check_listable_string_field(value, &format!("{at}.rule_set"))?;
     }
+    check_route_option_values(rule, at)?;
+    if let Some(value) = rule.get("ip_version").filter(|value| !prunes_value(value)) {
+        match value.as_i64() {
+            Some(4 | 6) => {}
+            Some(other) => return Err(format!("{at}: invalid ip version: {other}")),
+            None => {
+                return Err(go_type_error(
+                    value,
+                    &format!("{at}.ip_version"),
+                    "RawDefaultRule",
+                    "ip_version",
+                    "int",
+                ));
+            }
+        }
+    }
     // the process matchers are listables too, and the reference decodes them
     // before it ever looks at a rule's contents
     for field in ["process_name", "process_path", "process_path_regex", "user"] {
@@ -4889,6 +4922,41 @@ fn validate_route_rule(rule: &Value, at: &str, nested: bool) -> Result<(), Strin
             }
         }
         other => return Err(format!("{at}: unknown rule type: {other}")),
+    }
+    Ok(())
+}
+
+/// reference `option.RawRouteOptionsActionOptions`: the route-options fields
+/// a rule decodes on `route` and `route-options` alike (probed on
+/// v1.14.2-lx.11; lx.8 had not shown them to the key sweep).
+fn check_route_option_values(rule: &Map<String, Value>, at: &str) -> Result<(), String> {
+    const GO: &str = "RouteActionOptions.RawRouteOptionsActionOptions";
+    let not_string = |value: &Value, field: &str| {
+        format!(
+            "{at}.{field}: json: cannot unmarshal {} into Go struct field {GO}.{field} of type string",
+            json_kind(value)
+        )
+    };
+    for field in ["udp_timeout", "tls_fragment_fallback_delay"] {
+        if let Some(value) = rule.get(field).filter(|value| !prunes_value(value)) {
+            let Some(text) = value.as_str() else {
+                return Err(not_string(value, field));
+            };
+            go_parse_duration(text).map_err(|m| format!("{at}.{field}: {m}"))?;
+        }
+    }
+    if let Some(value) = rule
+        .get("network_strategy")
+        .filter(|value| !prunes_value(value))
+    {
+        let Some(text) = value.as_str() else {
+            return Err(not_string(value, "network_strategy"));
+        };
+        if !NETWORK_STRATEGIES.contains(&text) {
+            return Err(format!(
+                "{at}.network_strategy: unknown network strategy: {text}"
+            ));
+        }
     }
     Ok(())
 }
@@ -7235,6 +7303,51 @@ fn check_fptn_obfuscation(obj: &Map<String, Value>, at: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_mieru_out(i: usize, obj: &Map<String, Value>) -> Result<(), String> {
+    let at = format!("outbounds[{i}]");
+    let mut allowed: Vec<&str> = vec![
+        "type",
+        "tag",
+        "server",
+        "server_port",
+        "server_ports",
+        "transport",
+        "username",
+        "password",
+        "multiplexing",
+        "traffic_pattern",
+    ];
+    allowed.extend_from_slice(DIALER_OUT_FIELDS);
+    reject_unknown_fields(obj, &allowed, &at)?;
+    match obj.get("server") {
+        Some(Value::String(s)) if !s.is_empty() => {}
+        Some(Value::String(_)) | None | Some(Value::Null) => {
+            return Err(format!("{at}: missing server"));
+        }
+        Some(_) => return Err(format!("{at}.server: must be a string")),
+    }
+    if matches!(obj.get("server_port"), None | Some(Value::Null))
+        && matches!(obj.get("server_ports"), None | Some(Value::Null))
+    {
+        return Err(format!("{at}: missing server_port"));
+    }
+    for field in ["username", "password"] {
+        match obj.get(field) {
+            Some(Value::String(s)) if !s.is_empty() => {}
+            Some(Value::String(_)) | None | Some(Value::Null) => {
+                return Err(format!("{at}: missing {field}"));
+            }
+            Some(_) => return Err(format!("{at}.{field}: must be a string")),
+        }
+    }
+    match obj.get("transport") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) if s == "TCP" || s == "UDP" => {}
+        Some(_) => return Err(format!("{at}.transport: must be TCP or UDP")),
+    }
+    Ok(())
+}
+
 fn validate_fptn_out_decode(i: usize, obj: &Map<String, Value>) -> Result<(), String> {
     let at = format!("outbounds[{i}]");
     check_fptn_obfuscation(obj, &at)?;
@@ -7486,6 +7599,7 @@ fn validate_outbound(
         "anytls" => validate_anytls_out_decode(i, tag, obj)?,
         "snell" => validate_snell_out_decode(i, tag, obj)?,
         "fptn" => validate_fptn_out_decode(i, obj)?,
+        "mieru" => validate_mieru_out(i, obj)?,
         "socks" | "http" | "shadowsocks" | "shadowtls" | "vmess" | "vless" | "trojan"
         | "hysteria" | "naive" | "ssh" => {
             validate_plain_out_decode(i, ty, tag, obj)?;
@@ -7542,7 +7656,7 @@ fn validate_outbound(
         _ => {}
     }
 
-    if let Some(transport) = obj.get("transport") {
+    if let Some(transport) = obj.get("transport").filter(|_| ty != "mieru") {
         let go_struct = SERVER_OUT_BASES
             .iter()
             .find(|(known, _)| *known == ty)
@@ -7824,7 +7938,7 @@ fn validate_outbound(
                 }
             }
         }
-        "fptn" => {
+        "fptn" | "mieru" => {
             let server = obj.get("server").and_then(Value::as_str).unwrap_or("");
             if !server.is_empty()
                 && crate::netip_parse::parse_addr(server).is_err()
