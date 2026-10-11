@@ -1,0 +1,259 @@
+name: Check tachyon-core upstream release
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-core-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for a newer stable upstream release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      update: ${{ steps.check.outputs.update }}
+      version: ${{ steps.check.outputs.version }}
+      package_release: ${{ steps.check.outputs.package_release }}
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compare current package with upstream
+        id: check
+        run: |
+          set -euo pipefail
+          package_dir="openwrt/addon/packages/aarch64_cortex-a53"
+          release_json="$(curl -fsSL --retry 3 https://api.github.com/repos/Dushnilin/tachyon-core/releases/latest)"
+          tag="$(jq -r '.tag_name' <<<"$release_json")"
+          if [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unexpected upstream release tag: $tag"
+            exit 1
+          fi
+          echo "Latest stable upstream release: $tag"
+
+          mapfile -t current_packages < <(find "$package_dir" -maxdepth 1 -type f \
+            -name 'tachyon-core_*_aarch64_cortex-a53.ipk' -print)
+          if [[ "${#current_packages[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one current tachyon-core IPK"
+            exit 1
+          fi
+          current_name="$(basename "${current_packages[0]}")"
+          if [[ "$current_name" =~ ^tachyon-core_([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)_aarch64_cortex-a53\.ipk$ ]]; then
+            current_version="${BASH_REMATCH[1]}"
+            current_release="${BASH_REMATCH[2]}"
+          else
+            echo "::error::Unexpected current Core package filename: $current_name"
+            exit 1
+          fi
+
+          package_release=1
+          if [[ "$version" == "$current_version" ]]; then
+            if python3 openwrt/addon/scripts/repackage_core.py verify \
+              "${current_packages[0]}" --version "$version" --package-release "$current_release" \
+              >/dev/null 2>&1; then
+              echo "Upstream $version is already packaged with the fork parser"
+              echo "update=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            package_release=$((current_release + 1))
+            echo "Repairing package $version: current IPK does not contain the fork parser"
+          elif [[ "$(printf '%s\n' "$current_version" "$version" | sort -V | head -n 1)" == "$version" ]]; then
+            echo "Upstream release $version is not newer than packaged $current_version"
+            echo "update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package_release=$package_release" >> "$GITHUB_OUTPUT"
+          echo "update=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Verify source and build fork Core
+    needs: check
+    if: needs.check.outputs.update == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out fork patch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust for the OpenWrt target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+          components: rustfmt
+
+      - name: Verify upstream release, apply fork patch, test, and build
+        run: |
+          set -euo pipefail
+          version="${{ needs.check.outputs.version }}"
+          tag="v${version}"
+          asset="tachyon-core-aarch64-${tag}.tar.gz"
+          upstream_binary="tachyon-core-aarch64-${tag}"
+          download_dir="$RUNNER_TEMP/upstream"
+          source_dir="$RUNNER_TEMP/upstream-source"
+          mkdir -p "$download_dir"
+
+          base_url="https://github.com/Dushnilin/tachyon-core/releases/download/${tag}"
+          curl -fL --retry 3 "$base_url/$asset" -o "$download_dir/$asset"
+          curl -fL --retry 3 "$base_url/SHA256SUMS" -o "$download_dir/SHA256SUMS"
+          binary_hash="$(awk -v path="./$upstream_binary" '$2 == path { print $1 }' "$download_dir/SHA256SUMS")"
+          [[ "$binary_hash" =~ ^[[:xdigit:]]{64}$ ]] || {
+            echo "::error::No upstream checksum for $upstream_binary"
+            exit 1
+          }
+          tar -tzf "$download_dir/$asset" | grep -Fx "./$upstream_binary"
+          tar -xOf "$download_dir/$asset" "./$upstream_binary" > "$download_dir/$upstream_binary"
+          printf '%s  %s\n' "$binary_hash" "$download_dir/$upstream_binary" | sha256sum --check -
+          readelf -h "$download_dir/$upstream_binary" > "$download_dir/upstream-elf.txt"
+          grep -q 'Machine:.*AArch64' "$download_dir/upstream-elf.txt"
+
+          upstream_commit="$(curl -fsSL --retry 3 \
+            "https://api.github.com/repos/Dushnilin/tachyon-core/commits/$tag" | jq -r .sha)"
+          git clone --depth 1 --branch "$tag" \
+            https://github.com/Dushnilin/tachyon-core.git "$source_dir"
+          checked_out_commit="$(git -C "$source_dir" rev-parse HEAD)"
+          [[ "$checked_out_commit" == "$upstream_commit" ]] || {
+            echo "::error::Checked out source does not match upstream release tag $tag"
+            exit 1
+          }
+
+          if ! grep -q 'parse_naive_share_link' "$source_dir/crates/core-runtime/src/clash_api.rs"; then
+            gzip -dc openwrt/addon/patches/tachyon-core-naiveproxy-api.patch.gz |
+              patch --directory="$source_dir" --strip=1 --batch
+          fi
+          grep -q 'parse_naive_share_link' "$source_dir/crates/core-runtime/src/clash_api.rs"
+          grep -q 'parses_naive_share_links' "$source_dir/crates/core-runtime/tests/clash_api.rs"
+
+          cd "$source_dir"
+          cargo fmt --all -- --check
+          cargo test --locked -p core-runtime --test clash_api
+          cargo build --locked --release --target aarch64-unknown-linux-musl --bin tachyon-core
+          built_binary="$source_dir/target/aarch64-unknown-linux-musl/release/tachyon-core"
+          readelf -h "$built_binary" > "$download_dir/built-elf.txt"
+          grep -q 'Machine:.*AArch64' "$download_dir/built-elf.txt"
+          if readelf -l "$built_binary" > "$download_dir/built-program-headers.txt" &&
+            grep -q 'INTERP' "$download_dir/built-program-headers.txt"; then
+            echo "::error::The OpenWrt Core binary must be statically linked"
+            exit 1
+          fi
+          grep -aFq "tachyon-core $version" "$built_binary"
+          grep -aFq 'naive+https://' "$built_binary"
+          grep -aFq '/parse' "$built_binary"
+          mkdir -p "$RUNNER_TEMP/core-update"
+          cp "$built_binary" "$RUNNER_TEMP/core-update/tachyon-core"
+
+      - name: Upload verified build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: tachyon-core-${{ needs.check.outputs.version }}-${{ needs.check.outputs.package_release }}
+          path: ${{ runner.temp }}/core-update/tachyon-core
+          if-no-files-found: error
+          retention-days: 3
+
+  propose:
+    name: Package and open update pull request
+    needs: [check, build]
+    if: needs.check.outputs.update == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+
+      - name: Download built Core binary
+        uses: actions/download-artifact@v4
+        with:
+          name: tachyon-core-${{ needs.check.outputs.version }}-${{ needs.check.outputs.package_release }}
+          path: ${{ runner.temp }}/core-update
+
+      - name: Build and verify OpenWrt package
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          PACKAGE_RELEASE: ${{ needs.check.outputs.package_release }}
+        run: |
+          set -euo pipefail
+          package_dir="openwrt/addon/packages/aarch64_cortex-a53"
+          binary="$RUNNER_TEMP/core-update/tachyon-core"
+          [[ -f "$binary" && ! -L "$binary" ]] || {
+            echo "::error::Build artifact is missing or not a regular file"
+            exit 1
+          }
+          mapfile -t current_packages < <(find "$package_dir" -maxdepth 1 -type f \
+            -name 'tachyon-core_*_aarch64_cortex-a53.ipk' -print)
+          [[ "${#current_packages[@]}" -eq 1 ]]
+
+          new_package="$package_dir/tachyon-core_${VERSION}-${PACKAGE_RELEASE}_aarch64_cortex-a53.ipk"
+          python3 openwrt/addon/scripts/repackage_core.py build \
+            --base-package "${current_packages[0]}" \
+            --binary "$binary" \
+            --version "$VERSION" \
+            --package-release "$PACKAGE_RELEASE" \
+            --output "$new_package"
+          rm "${current_packages[0]}"
+          python3 openwrt/addon/scripts/repackage_core.py verify \
+            "$new_package" --version "$VERSION" --package-release "$PACKAGE_RELEASE" \
+            --binary "$binary"
+
+          python3 - "$VERSION" "$PACKAGE_RELEASE" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          readme = Path("openwrt/addon/README.md")
+          text = readme.read_text()
+          package = f"tachyon-core_{sys.argv[1]}-{sys.argv[2]}_aarch64_cortex-a53.ipk"
+          updated, count = re.subn(
+              r"`tachyon-core_[^`]+_aarch64_cortex-a53\.ipk`",
+              f"`{package}`",
+              text,
+          )
+          if count != 1:
+              raise SystemExit(f"expected one Core package reference in {readme}, found {count}")
+          readme.write_text(updated)
+          PY
+
+          (
+            cd "$package_dir"
+            sha256sum *.ipk > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+          sh -n openwrt/addon/install.sh
+
+      - name: Create upstream update pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ github.token }}
+          branch: automation/upstream-tachyon-core-v${{ needs.check.outputs.version }}-${{ needs.check.outputs.package_release }}
+          delete-branch: true
+          commit-message: "chore(openwrt): package tachyon-core ${{ needs.check.outputs.version }}-${{ needs.check.outputs.package_release }}"
+          title: "chore(openwrt): update tachyon-core to ${{ needs.check.outputs.version }}"
+          body: |
+            ## Upstream update
+
+            Updates the OpenWrt Core package to upstream release
+            [v${{ needs.check.outputs.version }}](https://github.com/Dushnilin/tachyon-core/releases/tag/v${{ needs.check.outputs.version }}).
+
+            The upstream ARM64 release binary passed the official `SHA256SUMS`
+            check, and the source checkout matches the release tag. The package
+            binary is rebuilt from tagged source with the fork's `POST /parse`
+            NaiveProxy patch applied.
+
+            `cargo fmt --all -- --check` and
+            `cargo test --locked -p core-runtime --test clash_api` passed before
+            packaging. The generated IPK metadata, static AArch64 binary, fork
+            parser, payload, and local package checksums were also verified.

@@ -62,6 +62,18 @@ fi
 	sha256sum -c SHA256SUMS
 ) || fail "package checksum verification failed"
 
+CORE_PACKAGE=$(awk '
+	$2 ~ /^tachyon-core_[^/]+_aarch64_cortex-a53\.ipk$/ {
+		count++
+		package = $2
+	}
+	END {
+		if (count != 1)
+			exit 1
+		print package
+	}
+' "$PACKAGE_DIR/SHA256SUMS") || fail "expected exactly one tachyon-core package in SHA256SUMS"
+
 for package in luci-app-passwall luci-app-passwall2; do
 	if opkg status "$package" 2>/dev/null | grep -q '^Status:.*installed'; then
 		fail "$package conflicts with Tachyon; remove it before installing the addon"
@@ -83,7 +95,7 @@ done
 
 echo "Installing Tachyon Core, Tachyon, and LuCI for $ARCH..."
 opkg install --force-reinstall \
-	"$PACKAGE_DIR/tachyon-core_0.0.6-1_aarch64_cortex-a53.ipk" \
+	"$PACKAGE_DIR/$CORE_PACKAGE" \
 	"$PACKAGE_DIR/tachyon_1.5.5.ipk" \
 	"$PACKAGE_DIR/luci-app-tachyon_1.5.5.ipk" \
 	"$PACKAGE_DIR/luci-i18n-tachyon-ru_1.5.5.ipk" ||
