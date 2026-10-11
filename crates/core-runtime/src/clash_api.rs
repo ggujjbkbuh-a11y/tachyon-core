@@ -1384,7 +1384,8 @@ async fn handle_proxy_route(
 
 /// `GET /proxies` — GLOBAL plus one entry per outbound (reference layout).
 fn proxies_view(router: &Router) -> Value {
-    let entries: Vec<(usize, String, &Outbound)> = router
+    let inner = router.inner();
+    let entries: Vec<(usize, String, &Outbound)> = inner
         .outbound_table()
         .map(|(i, tag, outbound)| (i, tag.to_string(), outbound))
         .collect();
@@ -1394,7 +1395,7 @@ fn proxies_view(router: &Router) -> Value {
         .map(|(_, tag, _)| tag.clone())
         .collect();
     // Reference keeps config order and omits direct/reject.
-    let default_tag = router.default_tag();
+    let default_tag = inner.default_tag();
 
     let mut proxies = serde_json::Map::new();
     proxies.insert(
@@ -1420,7 +1421,8 @@ fn proxies_view(router: &Router) -> Value {
 }
 
 fn proxy_info(router: &Router, index: usize, tag: &str) -> Value {
-    match router.outbound_table().find(|(i, ..)| *i == index) {
+    let inner = router.inner();
+    match inner.outbound_table().find(|(i, ..)| *i == index) {
         Some((_, _, outbound)) => proxy_info_outbound(router, index, outbound, tag),
         None => json!({}),
     }
@@ -1466,6 +1468,7 @@ fn clash_type_name(outbound: &Outbound) -> &'static str {
         Outbound::Fptn(_) => "FPTN",
         Outbound::Masque(_) => "MASQUE",
         Outbound::Snell(_) => "Snell",
+        Outbound::Mieru(_) => "Mieru",
         Outbound::Tuic(_) => "TUIC",
         Outbound::WireGuard(_) => "WireGuard",
         Outbound::OpenVpn(_) => "OpenVPN",
