@@ -14,7 +14,11 @@ async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 async fn spawn_echo() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+    spawn_echo_at("127.0.0.1:0").await
+}
+
+async fn spawn_echo_at(listen: &str) -> SocketAddr {
+    let listener = TcpListener::bind(listen).await.expect("bind echo");
     let addr = listener.local_addr().expect("echo addr");
     tokio::spawn(async move {
         loop {
@@ -796,6 +800,23 @@ async fn through_our_own_client(
     payload: &[u8],
 ) -> std::io::Result<Vec<u8>> {
     let echo = spawn_echo().await;
+    through_our_own_client_to(
+        server_inbound,
+        client_outbound,
+        core_runtime::inbound::Target::Ip(echo),
+        payload,
+    )
+    .await
+}
+
+async fn through_our_own_client_to(
+    server_inbound: Value,
+    client_outbound: Value,
+    target: core_runtime::inbound::Target,
+    payload: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    use core_runtime::inbound::Target;
+
     let tag = server_inbound["tag"]
         .as_str()
         .expect("the server inbound needs a tag")
@@ -833,9 +854,24 @@ async fn through_our_own_client(
     let mut greeting = [0u8; 2];
     stream.read_exact(&mut greeting).await?;
     assert_eq!(greeting, [0x05, 0x00], "socks greeting");
-    let mut request = vec![0x05, 0x01, 0x00, 0x01];
-    request.extend_from_slice(&[127, 0, 0, 1]);
-    request.extend_from_slice(&echo.port().to_be_bytes());
+    let mut request = vec![0x05, 0x01, 0x00];
+    match &target {
+        Target::Ip(addr) => match addr.ip() {
+            IpAddr::V4(ip) => {
+                request.push(1);
+                request.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                request.push(4);
+                request.extend_from_slice(&ip.octets());
+            }
+        },
+        Target::Domain(host, _) => {
+            request.extend_from_slice(&[3, u8::try_from(host.len()).expect("SOCKS domain length")]);
+            request.extend_from_slice(host.as_bytes());
+        }
+    }
+    request.extend_from_slice(&target.port().to_be_bytes());
     stream.write_all(&request).await?;
     let mut reply = [0u8; 4];
     stream.read_exact(&mut reply).await.map_err(io_shutdown)?;
@@ -1181,6 +1217,78 @@ async fn hysteria2_shutdown_releases_port_with_live_connections() {
 }
 
 #[tokio::test]
+async fn hysteria2_server_with_salamander_obfs_roundtrip() {
+    let _guard = test_guard().await;
+    let echo = spawn_echo().await;
+    let udp_echo = spawn_udp_echo().await;
+    let config = cfg(
+        json!({
+            "type": "hysteria2", "tag": "hy2", "listen": "127.0.0.1",
+            "listen_port": 0, "password": "salamander-test", "tls": {
+                "enabled": true,
+                "certificate": [include_str!("../../../tests/golden/certs/localhost.crt")],
+                "key": [include_str!("../../../tests/golden/certs/localhost.key")]
+            },
+            "obfs": {
+                "type": "salamander",
+                "password": "obfs-secret-password"
+            }
+        }),
+        json!([{"type": "direct", "tag": "direct"}]),
+    );
+    let mut instance = core_runtime::start(&config)
+        .await
+        .expect("start hy2 with obfs");
+    let addr = inbound_addr(&instance, "hy2");
+    let client_config = json!({
+        "type": "hysteria2", "server": "127.0.0.1", "server_port": addr.port(),
+        "password": "salamander-test", "tls": client_tls(),
+        "obfs": {
+            "type": "salamander",
+            "password": "obfs-secret-password"
+        }
+    });
+
+    let client = core_runtime::outbound::hysteria2::Hysteria2::build(
+        client_config.as_object().expect("client config"),
+        "obfs client",
+    )
+    .expect("build hy2 client");
+
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.connect(&core_runtime::inbound::Target::Ip(echo)),
+    )
+    .await
+    .expect("connect timeout")
+    .expect("connect hy2");
+    stream.write_all(b"live-obfs").await.expect("write echo");
+    let mut payload = [0u8; 9];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_exact(&mut payload),
+    )
+    .await
+    .expect("echo timeout")
+    .expect("read echo");
+    assert_eq!(&payload, b"live-obfs");
+
+    let udp = client
+        .connect_udp(&core_runtime::inbound::Target::Ip(udp_echo))
+        .await
+        .expect("connect hy2 udp");
+    udp.send(b"udp-obfs").await.expect("send udp");
+    let mut datagram = [0u8; 16];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(2), udp.recv(&mut datagram))
+        .await
+        .expect("udp timeout")
+        .expect("receive udp");
+    assert_eq!(&datagram[..n], b"udp-obfs");
+
+    instance.shutdown_wait().await;
+}
+
+#[tokio::test]
 async fn vless_server_over_tls_carries_our_own_client_traffic() {
     let _guard = test_guard().await;
     let uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
@@ -1331,6 +1439,78 @@ async fn a_xhttp_server_refuses_another_path() {
         got.is_empty(),
         "a refused xhttp session must not carry the payload: {got:?}"
     );
+}
+
+#[tokio::test]
+async fn vless_server_over_xhttp_h2_stream_one_carries_our_own_client_traffic() {
+    let _guard = test_guard().await;
+    let uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+    let mut server = vless_server(uuid, "");
+    server["transport"] = json!({"type": "xhttp", "path": "/bench"});
+    let mut s_tls = server_tls();
+    s_tls["alpn"] = json!(["h2"]);
+    server["tls"] = s_tls;
+
+    let mut client = vless_client(uuid, "");
+    client["transport"] = json!({"type": "xhttp", "path": "/bench", "mode": "stream-one"});
+    let mut c_tls = client_tls();
+    c_tls["alpn"] = json!(["h2"]);
+    client["tls"] = c_tls;
+
+    let got = through_our_own_client(server, client, b"through-h2-stream-one")
+        .await
+        .expect("vless over xhttp h2 stream-one round trip");
+    assert_eq!(String::from_utf8_lossy(&got), "through-h2-stream-one");
+}
+
+#[tokio::test]
+async fn vless_server_over_xhttp_h2_packet_up_carries_our_own_client_traffic() {
+    let _guard = test_guard().await;
+    let uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+    let mut server = vless_server(uuid, "");
+    server["transport"] = json!({"type": "xhttp", "path": "/bench"});
+    let mut s_tls = server_tls();
+    s_tls["alpn"] = json!(["h2"]);
+    server["tls"] = s_tls;
+
+    let mut client = vless_client(uuid, "");
+    client["transport"] = json!({"type": "xhttp", "path": "/bench", "mode": "packet-up"});
+    let mut c_tls = client_tls();
+    c_tls["alpn"] = json!(["h2"]);
+    client["tls"] = c_tls;
+
+    let got = through_our_own_client(server, client, b"through-h2-packet-up")
+        .await
+        .expect("vless over xhttp h2 packet-up round trip");
+    assert_eq!(String::from_utf8_lossy(&got), "through-h2-packet-up");
+}
+
+#[tokio::test]
+async fn trojan_server_over_tls_carries_domain_and_ipv6_targets() {
+    use core_runtime::inbound::Target;
+
+    let _guard = test_guard().await;
+    let ipv4 = spawn_echo().await;
+    let ipv6 = spawn_echo_at("[::1]:0").await;
+    // Encode a numeric hostname as a domain to avoid external DNS dependencies.
+    for target in [
+        Target::Domain("127.0.0.1".into(), ipv4.port()),
+        Target::Ip(ipv6),
+    ] {
+        let mut server = json!({
+            "type": "trojan", "tag": "trojan-in", "listen": "127.0.0.1",
+            "listen_port": free_port(),
+            "users": [{"name": "bob", "password": "hunter2"}]
+        });
+        server["tls"] = server_tls();
+        let mut client = json!({"type": "trojan", "tag": "out", "password": "hunter2"});
+        client["tls"] = client_tls();
+        let got =
+            through_our_own_client_to(server, client, target.clone(), b"trojan-address-over-tls")
+                .await
+                .unwrap_or_else(|e| panic!("{target:?}: {e}"));
+        assert_eq!(got, b"trojan-address-over-tls", "{target:?}");
+    }
 }
 
 #[tokio::test]

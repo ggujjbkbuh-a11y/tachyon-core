@@ -18,6 +18,7 @@ pub mod anytls;
 pub mod direct;
 pub mod fptn;
 pub mod hysteria2;
+pub mod mieru;
 pub mod mixed;
 pub mod mux;
 pub mod naive;
@@ -250,6 +251,16 @@ impl ClientConn {
         }
     }
 
+    /// A stream that carries a SOCKS5 request of its own (mieru): the success
+    /// `reply` is flushed once the upstream is up.
+    pub fn socks_stream(inner: AnyStream, local: SocketAddr, reply: Vec<u8>) -> Self {
+        Self {
+            inner,
+            reply: LazyReply::Pending(reply),
+            local: Some(local),
+        }
+    }
+
     /// The upstream is up: flush the success reply now (reference
     /// `ConnHandshakeSuccess`, called by the router right after the dial).
     ///
@@ -416,17 +427,21 @@ pub fn clash_meta(
     router: &Router,
     outbound_index: usize,
 ) -> clash_state::ConnMeta {
-    let host = match &ctx.destination {
-        Target::Ip(addr) => addr.ip().to_string(),
-        Target::Domain(host, _) => host.clone(),
+    // reference `TrackerMetadata`: the sniffed domain wins over the
+    // destination's own name, an IP destination has no host at all
+    let host = match (&ctx.domain, &ctx.destination) {
+        (Some(domain), _) if !domain.is_empty() => domain.clone(),
+        (_, Target::Domain(host, _)) => host.clone(),
+        _ => String::new(),
     };
     let mut chains = Vec::new();
     let mut index = Some(outbound_index);
+    let inner = router.inner();
     // expand selector groups into their selected member (one level, like the
     // reference chain display for group proxies)
     for _ in 0..8 {
         let Some(current) = index else { break };
-        let Some((_, tag, outbound)) = router.outbound_table().find(|(i, _, _)| *i == current)
+        let Some((_, tag, outbound)) = inner.outbound_table().find(|(i, _, _)| *i == current)
         else {
             break;
         };
@@ -437,19 +452,34 @@ pub fn clash_meta(
             _ => None,
         };
     }
-    let (rule, rule_payload) = ctx
-        .matched_rule
-        .clone()
-        .unwrap_or_else(|| ("".to_string(), String::new()));
+    let tag = ctx.inbound.clone().unwrap_or_default();
+    let inbound = match inner.inbound_type(&tag) {
+        Some(ty) if tag.is_empty() => ty.to_string(),
+        Some(ty) => format!("{ty}/{tag}"),
+        None => tag,
+    };
     clash_state::ConnMeta {
         network: ctx.network,
-        inbound: ctx.inbound.clone().unwrap_or_default(),
+        inbound,
         source: ctx.source.to_string(),
         host,
         destination: ctx.destination.to_string(),
         chains,
-        rule,
-        rule_payload,
+        rule: ctx.matched_rule.clone().unwrap_or_else(|| "final".into()),
+        rule_payload: String::new(),
+        process_path: ctx.process.as_ref().map(process_label).unwrap_or_default(),
+    }
+}
+
+/// Reference `processPath`: the path with its owner in brackets, or just the
+/// uid when the path is unknown.
+fn process_label(info: &crate::route::process::ProcessInfo) -> String {
+    match (info.path.as_str(), &info.user_name, info.user_id) {
+        ("", _, Some(uid)) => uid.to_string(),
+        ("", _, None) => String::new(),
+        (path, Some(name), _) if !name.is_empty() => format!("{path} ({name})"),
+        (path, _, Some(uid)) => format!("{path} ({uid})"),
+        (path, _, None) => path.to_string(),
     }
 }
 
@@ -990,7 +1020,10 @@ pub(crate) async fn drive_framed(
     let mut ctx = ConnContext::new(tag, peer, destination, "tcp");
     let decision = match router.route(&mut client, &mut ctx).await {
         Ok(decision) => decision,
-        Err(err) => return Err(err),
+        Err(err) => {
+            let _ = client.fail(&err).await;
+            return Err(err);
+        }
     };
     match decision {
         Decision::HijackDns => {
@@ -1002,7 +1035,14 @@ pub(crate) async fn drive_framed(
         }
         Decision::Outbound(idx) => {
             let dest = ctx.destination.clone();
-            let conn = router.connect_index(idx, &dest).await?;
+            let conn = match router.connect_index(idx, &dest).await {
+                Ok(conn) => conn,
+                Err(err) => {
+                    let _ = client.fail(&err).await;
+                    return Err(err);
+                }
+            };
+            client.established().await?;
             logging::info(format_args!("inbound {tag} {peer} CONNECT {dest}"));
             let tracker = clash_state::ConnHandle::open(clash_meta(&ctx, router, idx));
             pump_conn_tracked(client, conn, &ctx.sniff_prefix, Some(&tracker)).await
