@@ -148,6 +148,7 @@ jobs:
             exit 1
           }
 
+          cargo fmt --all
           cargo fmt --all -- --check
           cargo test --locked -p core-runtime --test clash_api
           cargo build --locked --release --target aarch64-unknown-linux-musl --bin tachyon-core
@@ -164,12 +165,14 @@ jobs:
           grep -aFq '/parse' "$built_binary"
           mkdir -p "$RUNNER_TEMP/core-update"
           cp "$built_binary" "$RUNNER_TEMP/core-update/tachyon-core"
+          git diff --binary HEAD > "$RUNNER_TEMP/core-update/upstream-source.patch"
+          git rev-parse HEAD > "$RUNNER_TEMP/core-update/base-commit"
 
       - name: Upload verified build output
         uses: actions/upload-artifact@v4
         with:
           name: tachyon-core-${{ needs.check.outputs.version }}-${{ needs.check.outputs.package_release }}
-          path: ${{ runner.temp }}/core-update/tachyon-core
+          path: ${{ runner.temp }}/core-update/*
           if-no-files-found: error
           retention-days: 3
 
@@ -197,23 +200,23 @@ jobs:
         env:
           VERSION: ${{ needs.check.outputs.version }}
           PACKAGE_RELEASE: ${{ needs.check.outputs.package_release }}
-          UPSTREAM_COMMIT: ${{ needs.check.outputs.upstream_commit }}
         run: |
           set -euo pipefail
           trusted_packager="$RUNNER_TEMP/repackage_core.py"
           cp openwrt/addon/scripts/repackage_core.py "$trusted_packager"
 
-          upstream_ref="refs/tags/upstream-v${VERSION}"
-          git fetch --no-tags https://github.com/Dushnilin/tachyon-core.git \
-            "refs/tags/v${VERSION}:$upstream_ref"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          checked_out_commit="$(git rev-parse "$upstream_ref^{commit}")"
-          [[ "$checked_out_commit" == "$UPSTREAM_COMMIT" ]] || {
-            echo "::error::Fetched source does not match the checked release tag"
+          source_patch="$RUNNER_TEMP/core-update/upstream-source.patch"
+          base_commit="$(cat "$RUNNER_TEMP/core-update/base-commit")"
+          [[ "$base_commit" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$base_commit" ]] || {
+            echo "::error::Source patch was built from a different fork commit"
             exit 1
           }
-          git merge --squash "$upstream_ref"
+          [[ -s "$source_patch" ]] || {
+            echo "::error::Verified upstream source patch is missing"
+            exit 1
+          }
+          git apply --check "$source_patch"
+          git apply "$source_patch"
 
           package_dir="openwrt/addon/packages/aarch64_cortex-a53"
           binary="$RUNNER_TEMP/core-update/tachyon-core"
