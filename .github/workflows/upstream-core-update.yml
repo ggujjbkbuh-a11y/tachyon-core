@@ -131,6 +131,8 @@ jobs:
           upstream_ref="refs/tags/upstream-${tag}"
           git fetch --no-tags https://github.com/Dushnilin/tachyon-core.git \
             "refs/tags/$tag:$upstream_ref"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           checked_out_commit="$(git rev-parse "$upstream_ref^{commit}")"
           [[ "$checked_out_commit" == "${{ needs.check.outputs.upstream_commit }}" ]] || {
             echo "::error::Fetched source does not match upstream release tag $tag"
@@ -204,6 +206,8 @@ jobs:
           upstream_ref="refs/tags/upstream-v${VERSION}"
           git fetch --no-tags https://github.com/Dushnilin/tachyon-core.git \
             "refs/tags/v${VERSION}:$upstream_ref"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           checked_out_commit="$(git rev-parse "$upstream_ref^{commit}")"
           [[ "$checked_out_commit" == "$UPSTREAM_COMMIT" ]] || {
             echo "::error::Fetched source does not match the checked release tag"
