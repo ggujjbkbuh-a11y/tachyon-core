@@ -195,16 +195,51 @@ def read_payload_content(blob: bytes, name: str) -> bytes:
         return archive.extractfile(member).read()
 
 
-def package_version(path: Path, name: str, version: str) -> dict[str, bytes]:
+def package_version(
+    path: Path,
+    name: str,
+    version: str,
+    package_release: int = 0,
+) -> dict[str, bytes]:
     parts = read_ipk(path)
     fields = control_fields(parts["control.tar.gz"])
     if fields.get("Package") != name:
         raise ValueError(f"{path} contains package {fields.get('Package')}, expected {name}")
-    if fields.get("Version") != version:
-        raise ValueError(f"{path} contains version {fields.get('Version')}, expected {version}")
+    expected_version = package_version_string(version, package_release)
+    if fields.get("Version") != expected_version:
+        raise ValueError(
+            f"{path} contains version {fields.get('Version')}, expected {expected_version}"
+        )
     if fields.get("Architecture") != "all":
         raise ValueError(f"{path} has unexpected architecture {fields.get('Architecture')}")
     return parts
+
+
+def package_version_string(version: str, package_release: int) -> str:
+    return f"{version}-{package_release}" if package_release else version
+
+
+def package_filename(package_name: str, version: str, package_release: int) -> str:
+    package_version = package_version_string(version, package_release)
+    return f"{package_name}_{package_version}.ipk"
+
+
+def set_package_release(parts: dict[str, bytes], version: str, package_release: int) -> None:
+    if package_release == 0:
+        return
+    control_content = read_payload_content(parts["control.tar.gz"], "control")
+    current = re.findall(rb"(?m)^Version: ([^\r\n]+)$", control_content)
+    if current != [version.encode()]:
+        raise ValueError(f"upstream package control must contain exactly Version: {version}")
+    replacement = re.sub(
+        rb"(?m)^Version: [^\r\n]+$",
+        f"Version: {package_version_string(version, package_release)}".encode(),
+        control_content,
+    )
+    parts["control.tar.gz"] = rewrite_tar_gz(
+        parts["control.tar.gz"],
+        {"control": replacement},
+    )
 
 
 def overlay_is_present(parts: dict[str, bytes], package_name: str) -> bool:
@@ -220,6 +255,7 @@ def prepare_package(
     output_path: Path,
     package_name: str,
     version: str,
+    package_release: int,
     patch_dir: Path,
 ) -> None:
     parts = package_version(input_path, package_name, version)
@@ -229,12 +265,18 @@ def prepare_package(
         with tempfile.TemporaryDirectory(prefix="tachyon-naiveproxy-") as directory:
             replacements = apply_patch(payload, patch_dir / spec["patch"], Path(directory))
         parts["data.tar.gz"] = rewrite_tar_gz(parts["data.tar.gz"], replacements)
+    set_package_release(parts, version, package_release)
     write_ipk(output_path, parts)
-    verify_package(output_path, package_name, version)
+    verify_package(output_path, package_name, version, package_release)
 
 
-def verify_package(path: Path, package_name: str, version: str) -> None:
-    parts = package_version(path, package_name, version)
+def verify_package(
+    path: Path,
+    package_name: str,
+    version: str,
+    package_release: int = 0,
+) -> None:
+    parts = package_version(path, package_name, version, package_release)
     spec = PACKAGE_SPECS[package_name]
     for payload_path, markers in spec["files"].items():
         content = read_payload_content(parts["data.tar.gz"], payload_path)
@@ -243,28 +285,43 @@ def verify_package(path: Path, package_name: str, version: str) -> None:
                 raise ValueError(f"{path} is missing required NaiveProxy marker {marker!r}")
 
 
-def build(upstream_dir: Path, output_dir: Path, version: str, patch_dir: Path) -> None:
+def build(
+    upstream_dir: Path,
+    output_dir: Path,
+    version: str,
+    package_release: int,
+    patch_dir: Path,
+) -> None:
     if not VERSION_RE.fullmatch(version):
         raise ValueError(f"invalid upstream version: {version}")
+    if package_release < 0:
+        raise ValueError(f"invalid package release: {package_release}")
     for package_name in PACKAGE_SPECS:
-        filename = f"{package_name}_{version}.ipk"
+        upstream_filename = f"{package_name}_{version}.ipk"
+        filename = package_filename(package_name, version, package_release)
         prepare_package(
-            upstream_dir / filename,
+            upstream_dir / upstream_filename,
             output_dir / filename,
             package_name,
             version,
+            package_release,
             patch_dir,
         )
         print(f"built and verified {filename}")
 
 
-def verify(directory: Path, version: str) -> None:
+def verify(directory: Path, version: str, package_release: int) -> None:
     if not VERSION_RE.fullmatch(version):
         raise ValueError(f"invalid upstream version: {version}")
+    if package_release < 0:
+        raise ValueError(f"invalid package release: {package_release}")
     for package_name in PACKAGE_SPECS:
-        path = directory / f"{package_name}_{version}.ipk"
-        verify_package(path, package_name, version)
-    print(f"verify OK: Tachyon and LuCI {version}, including NaiveProxy support")
+        path = directory / package_filename(package_name, version, package_release)
+        verify_package(path, package_name, version, package_release)
+    print(
+        f"verify OK: Tachyon and LuCI "
+        f"{package_version_string(version, package_release)}, including NaiveProxy support"
+    )
 
 
 def main() -> None:
@@ -274,15 +331,23 @@ def main() -> None:
     build_command.add_argument("--upstream-dir", type=Path, required=True)
     build_command.add_argument("--output-dir", type=Path, required=True)
     build_command.add_argument("--version", required=True)
+    build_command.add_argument("--package-release", type=int, default=0)
     build_command.add_argument("--patch-dir", type=Path, default=DEFAULT_PATCH_DIR)
     verify_command = commands.add_parser("verify", help="verify package metadata and NaiveProxy")
     verify_command.add_argument("--directory", type=Path, required=True)
     verify_command.add_argument("--version", required=True)
+    verify_command.add_argument("--package-release", type=int, default=0)
     args = parser.parse_args()
     if args.command == "build":
-        build(args.upstream_dir, args.output_dir, args.version, args.patch_dir)
+        build(
+            args.upstream_dir,
+            args.output_dir,
+            args.version,
+            args.package_release,
+            args.patch_dir,
+        )
     else:
-        verify(args.directory, args.version)
+        verify(args.directory, args.version, args.package_release)
 
 
 if __name__ == "__main__":

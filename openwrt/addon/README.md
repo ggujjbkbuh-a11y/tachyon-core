@@ -63,3 +63,7 @@ strict patches, and opens a separate pull request. A patch conflict or failed
 verification stops the update. Neither workflow merges a PR or publishes a
 package release automatically. See
 [`scripts/README.md`](scripts/README.md) for package maintenance details.
+
+These workflows update the repository and open PRs; they do not install
+packages on routers. After reviewing and merging an update PR, rerun the install
+command above on each router to fetch and install the new package set.

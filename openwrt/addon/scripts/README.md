@@ -27,6 +27,16 @@ updated packages in a pull request. If upstream changes conflict with a patch,
 the update stops for manual review. The updater does not merge PRs or publish
 releases automatically.
 
+For same-version upstream asset refreshes, the workflow compares the official
+package hashes with `openwrt/addon/packages/UPSTREAM_TACHYON_SHA256SUMS`. If the
+upstream packages changed without a semver change, it increments the OpenWrt
+package release (for example, `1.5.5` to `1.5.5-1`) so `opkg` recognizes an
+upgrade.
+
+Neither workflow installs updates on routers. After reviewing and merging its
+PR, rerun `openwrt/addon/install.sh` on each router to install the updated
+packages.
+
 If the current package has the same upstream version but is missing the fork's
 parser, the package release number is incremented and a repair update is
 proposed. For example, `0.0.6-1` becomes `0.0.6-2`.

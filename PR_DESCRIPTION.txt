@@ -19,8 +19,9 @@
 - Добавлены ежедневные проверки релизов upstream tachyon-core и tachyon:
   первая переносит коммиты Core, проверяет checksum, собирает бинарник и
   запускает тесты; вторая обновляет IPK Tachyon и LuCI, проверяет checksum и
-  строго накладывает fork-патчи NaiveProxy. Обе готовят отдельные PR, не
-  публикуя релизы и не объединяя их автоматически.
+  строго накладывает fork-патчи NaiveProxy, отслеживая также замену IPK без
+  смены semver. Обе готовят отдельные PR, не публикуя релизы, не объединяя их
+  и не устанавливая обновления на роутеры автоматически.
 
 Установка по SSH от root:
 wget -O /tmp/tachyon-addon-install.sh https://raw.githubusercontent.com/ggujjbkbuh-a11y/tachyon-core/main/openwrt/addon/install.sh
