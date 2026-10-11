@@ -49,7 +49,7 @@ sh /tmp/tachyon-addon-install.sh
 
 > Пакеты доступны в [`openwrt/addon/packages/aarch64_cortex-a53/`](openwrt/addon/packages/aarch64_cortex-a53/).
 > Релизы пакетов публикуются вручную через Actions → **Tachyon Core fork release**.
-> Стабильные релизы upstream проверяются ежедневно: workflow синхронизирует исходники с форком, проверяет бинарник и тесты, затем открывает PR. Подробнее: [обслуживание пакетов](openwrt/addon/scripts/README.md).
+> Релизы Tachyon Core и Tachyon проверяются ежедневно: workflow синхронизирует исходники Core, обновляет пакеты Tachyon и LuCI с сохранением изменений NaiveProxy, проверяет контрольные суммы и открывает PR. Подробнее: [обслуживание пакетов](openwrt/addon/scripts/README.md).
 
 ## ⚡ О движке tachyon-core
 

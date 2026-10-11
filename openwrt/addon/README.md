@@ -46,13 +46,20 @@ restricting access to `/etc` and disrupting system services such as `ubusd`.
 The NaiveProxy backend parser change and its tests are preserved in the
 compressed patch `patches/tachyon-naiveproxy.patch.gz`. The LuCI package already
 includes `naive+https://` URL validation and protocol display.
+The Tachyon release updater reapplies the compressed package overlays
+`patches/tachyon-naiveproxy-package.patch.gz` and
+`patches/luci-naiveproxy-package.patch.gz` to upstream IPKs. It stops for review
+if upstream changes make either patch fail to apply cleanly.
 
 ## Updating from upstream
 
-The `Check tachyon-core upstream release` workflow polls the latest stable
-upstream release daily. It verifies the official ARM64 binary checksum, merges
-the tagged upstream history into the fork, builds the static OpenWrt binary,
-runs the Clash API tests, and opens a pull request for review. Merge conflicts
-or failed tests stop the update. The workflow does not merge the PR or publish
-a package release automatically. See
+The `Check tachyon-core upstream release` and `Check Tachyon upstream release`
+workflows poll their respective latest stable releases daily. The Core workflow
+verifies the official ARM64 binary checksum, merges the tagged upstream history
+into the fork, builds the static OpenWrt binary, runs the Clash API tests, and
+opens a pull request for review. The Tachyon workflow verifies the release
+checksums for Tachyon and LuCI IPKs, reapplies the fork's NaiveProxy changes with
+strict patches, and opens a separate pull request. A patch conflict or failed
+verification stops the update. Neither workflow merges a PR or publishes a
+package release automatically. See
 [`scripts/README.md`](scripts/README.md) for package maintenance details.

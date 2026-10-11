@@ -74,6 +74,27 @@ CORE_PACKAGE=$(awk '
 	}
 ' "$PACKAGE_DIR/SHA256SUMS") || fail "expected exactly one tachyon-core package in SHA256SUMS"
 
+manifest_package() {
+	awk -v pattern="$1" '
+		$2 ~ pattern {
+			count++
+			package = $2
+		}
+		END {
+			if (count != 1)
+				exit 1
+			print package
+		}
+	' "$PACKAGE_DIR/SHA256SUMS"
+}
+
+TACHYON_PACKAGE=$(manifest_package '^tachyon_[0-9]+\.[0-9]+\.[0-9]+\.ipk$') ||
+	fail "expected exactly one Tachyon package in SHA256SUMS"
+LUCI_PACKAGE=$(manifest_package '^luci-app-tachyon_[0-9]+\.[0-9]+\.[0-9]+\.ipk$') ||
+	fail "expected exactly one LuCI package in SHA256SUMS"
+LUCI_I18N_PACKAGE=$(manifest_package '^luci-i18n-tachyon-ru_[0-9]+\.[0-9]+\.[0-9]+\.ipk$') ||
+	fail "expected exactly one Russian LuCI translation package in SHA256SUMS"
+
 for package in luci-app-passwall luci-app-passwall2; do
 	if opkg status "$package" 2>/dev/null | grep -q '^Status:.*installed'; then
 		fail "$package conflicts with Tachyon; remove it before installing the addon"
@@ -96,9 +117,9 @@ done
 echo "Installing Tachyon Core, Tachyon, and LuCI for $ARCH..."
 opkg install --force-reinstall \
 	"$PACKAGE_DIR/$CORE_PACKAGE" \
-	"$PACKAGE_DIR/tachyon_1.5.5.ipk" \
-	"$PACKAGE_DIR/luci-app-tachyon_1.5.5.ipk" \
-	"$PACKAGE_DIR/luci-i18n-tachyon-ru_1.5.5.ipk" ||
+	"$PACKAGE_DIR/$TACHYON_PACKAGE" \
+	"$PACKAGE_DIR/$LUCI_PACKAGE" \
+	"$PACKAGE_DIR/$LUCI_I18N_PACKAGE" ||
 	fail "package installation failed; see opkg output above"
 
 [ -x /etc/init.d/tachyon ] || fail "Tachyon init script was not installed"

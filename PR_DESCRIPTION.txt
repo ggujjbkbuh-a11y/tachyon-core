@@ -16,10 +16,11 @@
 - Включены пакеты Tachyon 1.5.5, tachyon-core 0.0.6-1, LuCI и русская
   локализация для `aarch64_cortex-a53`, с `SHA256SUMS`.
 - Добавлен OpenWrt-установщик и workflow для публикации пакетов в Releases.
-- Добавлена ежедневная проверка новых стабильных релизов upstream: workflow
-  проверяет официальный checksum, переносит upstream-коммиты в форк,
-  сохраняет изменения NaiveProxy, собирает Core, запускает тесты и предлагает
-  обновление отдельным PR.
+- Добавлены ежедневные проверки релизов upstream tachyon-core и tachyon:
+  первая переносит коммиты Core, проверяет checksum, собирает бинарник и
+  запускает тесты; вторая обновляет IPK Tachyon и LuCI, проверяет checksum и
+  строго накладывает fork-патчи NaiveProxy. Обе готовят отдельные PR, не
+  публикуя релизы и не объединяя их автоматически.
 
 Установка по SSH от root:
 wget -O /tmp/tachyon-addon-install.sh https://raw.githubusercontent.com/ggujjbkbuh-a11y/tachyon-core/main/openwrt/addon/install.sh

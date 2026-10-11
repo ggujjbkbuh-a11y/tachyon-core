@@ -1,0 +1,241 @@
+name: Check Tachyon upstream release
+
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-tachyon-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for a newer stable Tachyon release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      update: ${{ steps.check.outputs.update }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compare packaged Tachyon and LuCI with upstream
+        id: check
+        run: |
+          set -euo pipefail
+          package_dir="openwrt/addon/packages/aarch64_cortex-a53"
+          release_json="$(curl -fsSL --retry 3 https://api.github.com/repos/Dushnilin/tachyon/releases/latest)"
+          tag="$(jq -r '.tag_name' <<<"$release_json")"
+          if [[ "$tag" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unexpected upstream Tachyon release tag: $tag"
+            exit 1
+          fi
+
+          mapfile -t current_packages < <(find "$package_dir" -maxdepth 1 -type f \
+            \( -name 'tachyon_*.ipk' -o -name 'luci-app-tachyon_*.ipk' \
+              -o -name 'luci-i18n-tachyon-ru_*.ipk' \) -print | sort)
+          [[ "${#current_packages[@]}" -eq 3 ]] || {
+            echo "::error::Expected exactly one installed Tachyon, LuCI, and Russian localization IPK"
+            exit 1
+          }
+          current_version=""
+          for package in "${current_packages[@]}"; do
+            name="$(basename "$package")"
+            if [[ "$name" =~ ^(tachyon|luci-app-tachyon|luci-i18n-tachyon-ru)_([0-9]+\.[0-9]+\.[0-9]+)\.ipk$ ]]; then
+              package_version="${BASH_REMATCH[2]}"
+            else
+              echo "::error::Unexpected Tachyon package filename: $name"
+              exit 1
+            fi
+            if [[ -z "$current_version" ]]; then
+              current_version="$package_version"
+            elif [[ "$package_version" != "$current_version" ]]; then
+              echo "::error::Installed Tachyon and LuCI packages do not share one version"
+              exit 1
+            fi
+          done
+
+          python3 openwrt/addon/scripts/repackage_tachyon.py verify \
+            --directory "$package_dir" --version "$current_version"
+          echo "Installed Tachyon package version: $current_version"
+          echo "Latest stable upstream Tachyon release: $version"
+          if [[ "$version" == "$current_version" ||
+            "$(printf '%s\n' "$current_version" "$version" | sort -V | head -n 1)" == "$version" ]]; then
+            echo "No newer stable Tachyon release is available"
+            echo "update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "update=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Verify upstream Tachyon packages and preserve fork changes
+    needs: check
+    if: needs.check.outputs.update == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download, checksum, patch, and verify upstream IPKs
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          download_dir="$RUNNER_TEMP/upstream-tachyon"
+          output_dir="$RUNNER_TEMP/verified-tachyon"
+          mkdir -p "$download_dir" "$output_dir"
+          release_json="$(curl -fsSL --retry 3 \
+            "https://api.github.com/repos/Dushnilin/tachyon/releases/tags/$VERSION")"
+
+          checksum_asset="$(jq -er \
+            '[.assets[] | select(.name == "sha256sums.txt")] |
+              if length == 1 then .[0].browser_download_url else error("expected one checksum manifest") end' \
+            <<<"$release_json")"
+          checksum_digest="$(jq -r \
+            '[.assets[] | select(.name == "sha256sums.txt")] |
+              if length == 1 then .[0].digest // empty else empty end' \
+            <<<"$release_json")"
+          curl -fsSL --retry 3 "$checksum_asset" -o "$download_dir/sha256sums.txt"
+          if [[ -n "$checksum_digest" ]]; then
+            manifest_hash="$(sha256sum "$download_dir/sha256sums.txt" | cut -d' ' -f1)"
+            [[ "$checksum_digest" == "sha256:$manifest_hash" ]] || {
+              echo "::error::GitHub asset digest disagrees with the downloaded checksum manifest"
+              exit 1
+            }
+          fi
+          for package in \
+            "tachyon_${VERSION}.ipk" \
+            "luci-app-tachyon_${VERSION}.ipk" \
+            "luci-i18n-tachyon-ru_${VERSION}.ipk"; do
+            asset_url="$(jq -er --arg name "$package" \
+              '[.assets[] | select(.name == $name)] |
+                if length == 1 then .[0].browser_download_url else error("expected one IPK asset") end' \
+              <<<"$release_json")"
+            api_digest="$(jq -r --arg name "$package" \
+              '[.assets[] | select(.name == $name)] |
+                if length == 1 then .[0].digest // empty else empty end' \
+              <<<"$release_json")"
+            expected="$(awk -v name="$package" '$2 == name { print $1 }' \
+              "$download_dir/sha256sums.txt")"
+            [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || {
+              echo "::error::No valid upstream checksum for $package"
+              exit 1
+            }
+            if [[ -n "$api_digest" && "$api_digest" != "sha256:$expected" ]]; then
+              echo "::error::GitHub asset digest disagrees with SHA256SUMS for $package"
+              exit 1
+            fi
+            curl -fsSL --retry 3 "$asset_url" -o "$download_dir/$package"
+            printf '%s  %s\n' "$expected" "$download_dir/$package" | sha256sum --check -
+          done
+
+          python3 openwrt/addon/scripts/repackage_tachyon.py build \
+            --upstream-dir "$download_dir" \
+            --output-dir "$output_dir" \
+            --version "$VERSION"
+          python3 openwrt/addon/scripts/repackage_tachyon.py verify \
+            --directory "$output_dir" --version "$VERSION"
+          find "$output_dir" -maxdepth 1 -type f -name '*.ipk' -exec sh -c '
+            for package do
+              sha256sum "$package"
+            done
+          ' sh {} +
+
+      - name: Upload verified Tachyon packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: tachyon-${{ needs.check.outputs.version }}
+          path: ${{ runner.temp }}/verified-tachyon/*.ipk
+          if-no-files-found: error
+          retention-days: 3
+
+  propose:
+    name: Package and open Tachyon update pull request
+    needs: [check, build]
+    if: needs.check.outputs.update == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download verified Tachyon packages
+        uses: actions/download-artifact@v4
+        with:
+          name: tachyon-${{ needs.check.outputs.version }}
+          path: ${{ runner.temp }}/verified-tachyon
+
+      - name: Replace packages and verify checksums
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          package_dir="openwrt/addon/packages/aarch64_cortex-a53"
+          rm -f "$package_dir"/tachyon_*.ipk \
+            "$package_dir"/luci-app-tachyon_*.ipk \
+            "$package_dir"/luci-i18n-tachyon-ru_*.ipk
+          cp "$RUNNER_TEMP"/verified-tachyon/*.ipk "$package_dir/"
+          python3 openwrt/addon/scripts/repackage_tachyon.py verify \
+            --directory "$package_dir" --version "$VERSION"
+
+          python3 - "$VERSION" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          readme = Path("openwrt/addon/README.md")
+          text = readme.read_text()
+          replacements = {
+              r"`tachyon_[^`]+\.ipk`": f"`tachyon_{sys.argv[1]}.ipk`",
+              r"`luci-app-tachyon_[^`]+\.ipk`": f"`luci-app-tachyon_{sys.argv[1]}.ipk`",
+              r"`luci-i18n-tachyon-ru_[^`]+\.ipk`": f"`luci-i18n-tachyon-ru_{sys.argv[1]}.ipk`",
+          }
+          for pattern, replacement in replacements.items():
+              text, count = re.subn(pattern, replacement, text)
+              if count != 1:
+                  raise SystemExit(f"expected one package reference matching {pattern}, found {count}")
+          readme.write_text(text)
+          PY
+
+          (
+            cd "$package_dir"
+            sha256sum *.ipk > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+          sh -n openwrt/addon/install.sh
+
+      - name: Create upstream Tachyon update pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ github.token }}
+          branch: automation/upstream-tachyon-v${{ needs.check.outputs.version }}
+          delete-branch: true
+          commit-message: "chore(openwrt): package Tachyon ${{ needs.check.outputs.version }}"
+          title: "chore(openwrt): update Tachyon and LuCI to ${{ needs.check.outputs.version }}"
+          body: |
+            ## Upstream Tachyon update
+
+            Updates Tachyon, LuCI, and Russian localization to
+            [upstream release ${{ needs.check.outputs.version }}](https://github.com/Dushnilin/tachyon/releases/tag/${{ needs.check.outputs.version }}).
+
+            The upstream IPKs passed the release SHA256 manifest and GitHub asset
+            digest checks. The fork's NaiveProxy changes were applied as strict
+            patches; any source drift or patch conflict stops the workflow.
+            Package metadata, NaiveProxy parser/UI markers, and generated package
+            checksums were verified before this PR was opened.
