@@ -2,9 +2,10 @@
 
 ![Tachyon Core Banner](assets/readme/hero.svg)
 
-[![OpenWrt Add-on](https://img.shields.io/badge/OpenWrt-готовый_аддон-10B981?style=for-the-badge&logo=openwrt)](openwrt/addon/README.md)
+[![Fork](https://img.shields.io/badge/Project-fork-8B5CF6?style=for-the-badge&logo=github)](https://github.com/Dushnilin/tachyon-core)
+[![OpenWrt Packages](https://img.shields.io/badge/OpenWrt-пакеты-10B981?style=for-the-badge&logo=openwrt)](openwrt/addon/README.md)
 [![NaiveProxy](https://img.shields.io/badge/NaiveProxy-naive%2Bhttps-6366F1?style=for-the-badge)](openwrt/addon/README.md)
-[![Addon Releases](https://img.shields.io/github/v/release/ggujjbkbuh-a11y/tachyon-core?filter=tachyon-addon-*)](https://github.com/ggujjbkbuh-a11y/tachyon-core/releases)
+[![Fork Releases](https://img.shields.io/github/v/release/ggujjbkbuh-a11y/tachyon-core?filter=tachyon-addon-*)](https://github.com/ggujjbkbuh-a11y/tachyon-core/releases)
 [![Stars](https://img.shields.io/github/stars/Dushnilin/tachyon-core?style=for-the-badge&color=00F0FF)](https://github.com/Dushnilin/tachyon-core/stargazers)
 [![Rust](https://img.shields.io/badge/Engine-Rust-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Binary Size](https://img.shields.io/badge/Core-10.0_--_12.8_MiB-38BDF8?style=for-the-badge&logo=target)](BENCHMARK.md)
@@ -22,12 +23,17 @@
   <img src="assets/readme/divider_stream.svg" width="100%" alt="divider" />
 </p>
 
-## 🚀 Установить OpenWrt-аддон
+## 🚀 Форк и пакеты для OpenWrt
 
-Tachyon — готовый аддон для OpenWrt: **LuCI + служба управления + tachyon-core**
-с поддержкой ссылок NaiveProxy `naive+https://`. Установщик сохраняет
-`/etc/config/tachyon`, проверяет SHA-256 пакетов и настраивает Core как движок
-Tachyon. Сейчас готовый комплект собран для архитектуры `aarch64_cortex-a53`.
+Этот репозиторий — форк [Dushnilin/tachyon-core](https://github.com/Dushnilin/tachyon-core),
+а не отдельный upstream-проект. Здесь развиваются исходники ядра и его
+интеграция с OpenWrt. Основные дополнения форка — разбор ссылок NaiveProxy
+`naive+https://` через Clash API, тесты и документация, а также готовые
+OpenWrt-пакеты с LuCI и установщиком.
+
+Пакетный комплект включает Tachyon, LuCI и `tachyon-core`; установщик сохраняет
+`/etc/config/tachyon`, проверяет SHA-256 и настраивает Core как движок Tachyon.
+Сейчас он собран для `aarch64_cortex-a53`.
 
 Выполните по SSH от `root`:
 
@@ -39,10 +45,10 @@ sh /tmp/tachyon-addon-install.sh
 
 После установки откройте **LuCI → Services → Tachyon**. Если установлен
 `https-dns-proxy`, скрипт удалит конфликтующий пакет, не удаляя его UCI-настройки.
-Подробности, состав пакетов и контрольные суммы: [инструкция по аддону](openwrt/addon/README.md).
+Подробности, состав пакетов и контрольные суммы: [инструкция по пакетам OpenWrt](openwrt/addon/README.md).
 
-> Пакеты доступны в репозитории в [`openwrt/addon/packages/aarch64_cortex-a53/`](openwrt/addon/packages/aarch64_cortex-a53/).
-> Пакеты также будут прикрепляться к GitHub Releases; публикация запускается вручную из Actions → **OpenWrt add-on release**.
+> Пакеты доступны в [`openwrt/addon/packages/aarch64_cortex-a53/`](openwrt/addon/packages/aarch64_cortex-a53/).
+> Релизы пакетов публикуются вручную через Actions → **Tachyon Core fork release**.
 
 ## ⚡ О движке tachyon-core
 
@@ -254,7 +260,7 @@ cargo zigbuild --target x86_64-unknown-linux-musl --release      # Мини-ПК
 
 ## 📜 Лицензия
 
-**[GPL-3.0-only](LICENSE)**, унаследована от sing-box и sing-box-lx. `tachyon-core` — независимая разработка сообщества Tachyon, не аффилированная с SagerNet или Leadaxe. Авторские права на протоколы и спецификации sing-box принадлежат их законным авторам.
+**[GPL-3.0-only](LICENSE)**, унаследована от sing-box и sing-box-lx. Этот репозиторий — форк [Dushnilin/tachyon-core](https://github.com/Dushnilin/tachyon-core) с собственными изменениями; он не является официальным проектом SagerNet или Leadaxe. Авторские права на протоколы и спецификации sing-box принадлежат их законным авторам.
 
 <p align="center">
   <img src="assets/readme/footer_tachyon.svg" width="100%" alt="Tachyon Community Footer" />

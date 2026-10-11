@@ -1,0 +1,28 @@
+Форк tachyon-core: NaiveProxy и поддержка OpenWrt
+
+Развитие форка Dushnilin/tachyon-core с поддержкой NaiveProxy и пакетной
+интеграцией Tachyon для OpenWrt.
+
+Что сделано:
+- `crates/core-runtime/src/clash_api.rs`: добавлен Clash API `POST /parse`,
+  преобразующий `naive+https://` в outbound `naive`. Обрабатываются порт 443
+  по умолчанию, IPv6, percent-encoded учётные данные и тег из fragment.
+- `crates/core-runtime/tests/clash_api.rs`: тесты успешного и ошибочного
+  разбора. `docs/reference/clash-api.md`: документация endpoint.
+- `openwrt/addon/patches/tachyon-naiveproxy.patch.gz`: изменения backend
+  Tachyon — `tachyon/files/usr/lib/singbox/generator_outbounds.uc` добавляет
+  генерацию outbound для ручных ссылок; `tachyon/files/usr/lib/subscription/parser.uc`
+  добавляет разбор NaiveProxy в подписках. Добавлен `tests/naiveproxy.sh`.
+- Включены пакеты Tachyon 1.5.5, tachyon-core 0.0.6-1, LuCI и русская
+  локализация для `aarch64_cortex-a53`, с `SHA256SUMS`.
+- Добавлен OpenWrt-установщик и workflow для публикации пакетов в Releases.
+
+Установка по SSH от root:
+wget -O /tmp/tachyon-addon-install.sh https://raw.githubusercontent.com/ggujjbkbuh-a11y/tachyon-core/main/openwrt/addon/install.sh
+sh /tmp/tachyon-addon-install.sh
+
+Проверены тесты Clash API, backend-тесты NaiveProxy, shell-синтаксис
+установщика, IPK и SHA-256. Работа NaiveProxy подтверждена на роутере.
+
+Готовые пакеты доступны для `aarch64_cortex-a53`.
+Релиз: https://github.com/ggujjbkbuh-a11y/tachyon-core/releases/tag/tachyon-addon-v1.5.6

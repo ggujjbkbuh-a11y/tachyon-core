@@ -1,8 +1,10 @@
-# Tachyon OpenWrt Add-on
+# Tachyon Core Fork: OpenWrt Packages
 
-This add-on bundles the Tachyon management service, its LuCI interface, and
-`tachyon-core` as the managed sing-box-compatible engine. The existing
-`/etc/config/tachyon` configuration is preserved during installation.
+This repository is a fork of [Dushnilin/tachyon-core](https://github.com/Dushnilin/tachyon-core).
+This package set bundles the Tachyon management service, its LuCI interface,
+and `tachyon-core` as the managed sing-box-compatible engine. It also includes
+the fork's NaiveProxy support. The existing `/etc/config/tachyon` configuration
+is preserved during installation.
 
 ## Supported device
 
@@ -29,7 +31,7 @@ packages; those must be removed manually if present.
 The installer does not overwrite the saved Tachyon configuration. LuCI is
 available under **Services → Tachyon** after installation.
 
-## Package set
+## Published package set
 
 Packages and their checksums are in `packages/aarch64_cortex-a53/`:
 

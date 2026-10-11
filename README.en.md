@@ -2,9 +2,10 @@
 
 ![Tachyon Core Banner](assets/readme/hero.svg)
 
-[![OpenWrt Add-on](https://img.shields.io/badge/OpenWrt-ready_add--on-10B981?style=for-the-badge&logo=openwrt)](openwrt/addon/README.md)
+[![Fork](https://img.shields.io/badge/Project-fork-8B5CF6?style=for-the-badge&logo=github)](https://github.com/Dushnilin/tachyon-core)
+[![OpenWrt Packages](https://img.shields.io/badge/OpenWrt-packages-10B981?style=for-the-badge&logo=openwrt)](openwrt/addon/README.md)
 [![NaiveProxy](https://img.shields.io/badge/NaiveProxy-naive%2Bhttps-6366F1?style=for-the-badge)](openwrt/addon/README.md)
-[![Addon Releases](https://img.shields.io/github/v/release/ggujjbkbuh-a11y/tachyon-core?filter=tachyon-addon-*)](https://github.com/ggujjbkbuh-a11y/tachyon-core/releases)
+[![Fork Releases](https://img.shields.io/github/v/release/ggujjbkbuh-a11y/tachyon-core?filter=tachyon-addon-*)](https://github.com/ggujjbkbuh-a11y/tachyon-core/releases)
 [![Stars](https://img.shields.io/github/stars/Dushnilin/tachyon-core?style=for-the-badge&color=00F0FF)](https://github.com/Dushnilin/tachyon-core/stargazers)
 [![Rust](https://img.shields.io/badge/Engine-Rust-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Binary Size](https://img.shields.io/badge/Core-10.0_--_12.8_MiB-38BDF8?style=for-the-badge&logo=target)](BENCHMARK.md)
@@ -22,12 +23,18 @@
   <img src="assets/readme/divider_stream.svg" width="100%" alt="divider" />
 </p>
 
-## 🚀 Install the OpenWrt add-on
+## 🚀 The fork and OpenWrt packages
 
-Tachyon is a ready-to-install OpenWrt add-on: **LuCI + management service +
-tachyon-core**, including `naive+https://` NaiveProxy links. The installer
-preserves `/etc/config/tachyon`, verifies package SHA-256 checksums, and configures
-Core as Tachyon's managed engine. The checked-in package set currently targets
+This repository is a fork of
+[Dushnilin/tachyon-core](https://github.com/Dushnilin/tachyon-core), not a
+separate upstream project. It develops the core source and its OpenWrt
+integration. Fork-specific additions include parsing `naive+https://`
+NaiveProxy links through the Clash API, tests and documentation, and OpenWrt
+packages with LuCI and an installer.
+
+The package set bundles Tachyon, LuCI, and `tachyon-core`. The installer
+preserves `/etc/config/tachyon`, verifies package SHA-256 checksums, and
+configures Core as Tachyon's managed engine. It currently targets
 `aarch64_cortex-a53`.
 
 Run over SSH as `root`:
@@ -40,10 +47,10 @@ sh /tmp/tachyon-addon-install.sh
 
 Then open **LuCI → Services → Tachyon**. If `https-dns-proxy` is installed, the
 installer removes that conflicting package while preserving its UCI settings.
-See the [add-on guide](openwrt/addon/README.md) for package details and checksums.
+See the [OpenWrt package guide](openwrt/addon/README.md) for package details and checksums.
 
 > Packages are checked in under [`openwrt/addon/packages/aarch64_cortex-a53/`](openwrt/addon/packages/aarch64_cortex-a53/).
-> Packages can also be attached to GitHub Releases; publish them manually from Actions → **OpenWrt add-on release**.
+> Package releases are published manually from Actions → **Tachyon Core fork release**.
 
 ## ⚡ About the tachyon-core engine
 
@@ -255,7 +262,7 @@ Features are split into phases with automatic differential testing against the r
 
 ## 📜 License
 
-**[GPL-3.0-only](LICENSE)**, inherited from sing-box and sing-box-lx. `tachyon-core` is an independent Tachyon community project, not affiliated with SagerNet or Leadaxe. Copyrights on the protocols and sing-box specifications belong to their respective authors.
+**[GPL-3.0-only](LICENSE)**, inherited from sing-box and sing-box-lx. This repository is a fork of [Dushnilin/tachyon-core](https://github.com/Dushnilin/tachyon-core) with its own changes; it is not an official SagerNet or Leadaxe project. Copyrights on the protocols and sing-box specifications belong to their respective authors.
 
 <p align="center">
   <img src="assets/readme/footer_tachyon.svg" width="100%" alt="Tachyon Community Footer" />
