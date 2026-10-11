@@ -3,6 +3,60 @@
 All notable changes to tachyon-core. The version is the workspace version in
 `Cargo.toml`; a tag that disagrees with it is refused by the release workflow.
 
+## 0.0.7
+
+Point release delivering native Brutal congestion control for Hysteria2, resilient non-fatal action: resolve with real IP destination rewriting for ByeDPI/Zapret, pure-Rust Tailscale mesh outbound, UDP L7 protocol sniffing, and OpenWrt runtime hardening.
+
+### Fixes & Improvements
+
+- **Hysteria2 Brutal Congestion Control**:
+  - Implemented native Brutal congestion controller factory and pacing engine in Quinn, pacing packet transmission at the configured `up_mbps` rate without halving or backing off the congestion window upon packet loss.
+  - Neutralizes ISP packet throttling and artificial packet drop injected by TSPU filters on Hysteria2 tunnels.
+- **Routing Engine & ByeDPI / Zapret Interop**:
+  - Made DNS failures in `action: resolve` non-fatal: routing evaluation proceeds to fallback and section outbounds rather than aborting client TCP sessions at the router stage.
+  - Replaced target destination with resolved IP while preserving the original hostname in `ctx.domain`, ensuring SOCKS outbounds (such as ByeDPI `ciadpi`) receive clean IP targets (`ATYP 0x01`/`0x04`) and permanently eliminating FakeIP loopback loops on OpenWrt routers.
+  - Added support for `hosts` and `local`/`neighbor` server types in `lookup_via`.
+- **Pure-Rust Tailscale Outbound**:
+  - Completed end-to-end user-space Tailscale mesh client support with STUN, coordinator authentication, netmap syncing, and direct P2P UDP packet transmission without C-crypto dependencies.
+- **Protocol Sniffing & Framing Hardening**:
+  - Added UDP L7 packet sniffing for QUIC (v1/v2 Initial and fragmented ClientHello), DNS, STUN, and BitTorrent.
+  - Handled empty TLS record frames gracefully without terminating the connection processor.
+  - Cleared intermediate plaintext buffers on authentication tag mismatch in software AES-GCM.
+  - Fixed composite duration parsing (e.g. `1m30s`, `300ms`) and supported `udp_timeout` and `ip_version` routing rule options.
+  - Aligned Clash API `/rules` and `/connections` outputs with the sing-box reference schema.
+
+## 0.0.6
+
+Point release delivering zero-downtime atomic in-place configuration reload via SIGHUP, DNS query loop prevention with UDP retransmission, process-stable randomized TLS fingerprints, and Trojan server address type framing fixes.
+
+### Fixes & Improvements
+
+- **Zero-Downtime Atomic In-Place SIGHUP Reload**:
+  - Implemented true in-place configuration swapping when inbound listeners remain unchanged, keeping existing listener sockets open and active TCP connections uninterrupted.
+  - Preserved outbound latency measurements (`delay_history`), selector selections, and `urltest` group latencies across reloads by tag mapping, permanently eliminating `N/A` latency resets in Clash API and dashboard clients.
+  - Migrated active DNS cache entries, resolved server bootstrap IP addresses, reverse DNS records, and FakeIP LRU address-to-domain mapping pools across reloads without state flushing.
+  - Added atomic rollback: invalid configurations, syntax errors, or unresolvable server references fail gracefully with running listeners and routes completely untouched.
+- **DNS Resolver Hardening & Retransmission**:
+  - Eliminated fallback to system resolver (`lookup_host`) when a configured `domain_resolver` fails or returns no records, preventing recursive forwarding amplification loops between `dnsmasq` and `sing-box` on port 53.
+  - Added UDP query retransmission loop (1.5s interval bounded by query timeout) to gracefully recover from dropped DNS packets on lossy PPPoE links.
+- **Process-Stable Random & Randomized uTLS Fingerprints**:
+  - Enabled runtime construction and execution for `tls.utls.fingerprint: "random"` and `"randomized"`, including under REALITY outbounds (PR #11 by @Screamshow).
+  - Selected profile remains stable per-process across outbounds, reloads, and handshakes, with cipher suite and extension shuffling preserving HTTP/2 ALPN and hybrid group pairs.
+- **Trojan Inbound Server Address Types & IPv6 Support**:
+  - Isolated SOCKS ATYP translation strictly to the Trojan protocol boundary, preserving standard binary framing for VLESS and VMess transports (PR #10 by @MaksSt).
+  - Fixed TLS streaming to domain and IPv6 target destinations on the Trojan server inbound, backed by wire regression test suites.
+
+## 0.0.5
+
+### DNS: интернет пропадал на роутере с большим конфигом
+- Адрес DoH-сервера, который разрешается через `domain_resolver`, теперь кэшируется на минуту, а одновременные разрешения идут по одному. Раньше десятки узлов в один момент слали одинаковый запрос на bootstrap, апстрим часть A-запросов дропал, каждый ждал полный таймаут, потом ядро уходило в системный резолвер, то есть в dnsmasq, а он обратно в ядро. Получалась петля, dnsmasq упирался в лимит запросов.
+- Один упавший тип записи (A или AAAA) больше не валит весь bootstrap-запрос.
+- В предупреждении про fallback теперь настоящая причина.
+
+### mieru: клиент и сервер (TCP)
+- Outbound и inbound `mieru`, проверено в обе стороны с настоящими `mieru`/`mita` 3.38.0 (небольшие запросы и файл 100 КБ байт-в-байт).
+- Нет UDP-транспорта и мультиплексирования на клиенте, скорость не измерялась.
+
 ## 0.0.4
 
 ### XHTTP: большой пинг
