@@ -36,9 +36,9 @@ available under **Services → Tachyon** after installation.
 Packages and their checksums are in `packages/aarch64_cortex-a53/`:
 
 - `tachyon-core_0.0.7-1_aarch64_cortex-a53.ipk`
-- `tachyon_1.5.5-1.ipk`
-- `luci-app-tachyon_1.5.5-1.ipk`
-- `luci-i18n-tachyon-ru_1.5.5-1.ipk`
+- `tachyon_1.5.13.ipk`
+- `luci-app-tachyon_1.5.13.ipk`
+- `luci-i18n-tachyon-ru_1.5.13.ipk`
 
 The LuCI package has normalized directory permissions (`0755`) to avoid
 restricting access to `/etc` and disrupting system services such as `ubusd`.
